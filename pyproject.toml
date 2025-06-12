@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=30.3.0", "wheel", "setuptools_scm[toml]>=6.2,!=8.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+write_to = "hera_coupling/_version.py"
+parentdir_prefix_version = "hera_coupling-"
+fallback_version  = "0.0.0"
+
+[project]
+name = "hera_coupling"
+description = "Algorithms and utilities for modeling and mitigating mutual coupling in HERA data."
+readme = "README.md"
+authors = [
+  {name="HERA Team"},
+]
+license = {text="BSD"}
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: English",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Astronomy",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dynamic=["version"]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pre-commit",
+    "pytest-cov",
+    "pytest-xdist",
+    "hypothesis",
+]
+
+[tool.pytest]
+addopts = "--ignore=scripts --cov=hera_coupling --cov-config=.coveragerc"
