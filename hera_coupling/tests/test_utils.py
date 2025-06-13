@@ -20,3 +20,4 @@ def test_sylvester_solver():
 
     # Check if the solutions are close
     assert np.allclose(solution, expected_solution, atol=1e-6), "The solutions do not match!"
+    assert np.allclose(solution, A, atol=1e-6), "Solution does not match the input matrix"

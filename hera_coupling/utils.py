@@ -18,6 +18,18 @@ class SylvesterSolver:
         R : ndarray
             The right matrix in the Sylvester equation.
         """
+        self.cache_schur_decomposition(L, R)
+
+    def cache_schur_decomposition(self, L, R):
+        """
+        Initialize the SylvesterSolver with matrices L and R.
+        Parameters
+        ----------
+        L : ndarray
+            The left matrix in the Sylvester equation.
+        R : ndarray
+            The right matrix in the Sylvester equation.
+        """
         # Schur decomposition of L
         T1, U1 = schur(L, output='real')  # SciPy uses 'real' even for complex
         # Schur of R^\dagger

@@ -1,9 +1,9 @@
 import copy
 import numpy as np
 from typing import Dict, Optional
-
 from hera_cal.datacontainer import DataContainer
 
+from .utils import SylvesterSolver
 
 class UVCoupling:
     """
@@ -35,7 +35,7 @@ class UVCoupling:
             the observation, instrument, or processing steps.
         """
         self.coupling = np.asarray(coupling)
-        self.antpos = dict(antpos)  # Make a copy
+        self.antpos = dict(antpos)
         self.freqs = freqs
         self.times = times  
         self.metadata = metadata or {}
@@ -44,7 +44,10 @@ class UVCoupling:
         # Derived properties
         self.ants = sorted(list(self.antpos.keys()))
         self.Nants = len(self.ants)
-        
+        self.Ntimes = 1 if self.times is None else len(self.times)
+        self.Nfreqs = self.freqs.size
+        self.is_time_invariant = self.Ntimes == 1
+
         # Validate shapes
         self._validate_shapes()
         
@@ -103,39 +106,70 @@ class UVCoupling:
         # 3. We may want to invert this once and store it, as such
         # we may want to have self.inverted = True/False and have this function
         # return UVCoupling(pinv(coupling), ...), and then have the
+        
+        # Validate the input data
+        self._validate_data(data)
 
         # Copy the data if not inplace
         if not inplace:
             data = copy.deepcopy(data)
 
-
-        for ti, fi in zip(data.times, data.freqs):
+        for fi in data.freqs:
             for pi, pol in enumerate(data.pols):
-                # Load the data container in workable format and apply the coupling parameters.
-                data_matrix = to_matrix(
-                    data, ti, fi, pol # TODO: Don't really like this
-                )
+                # Pre-compute the Sylvester solver if time-invariant
+                if self.is_time_invariant:
+                    if first_order:
+                        solver = SylvesterSolver(
+                            self.coupling[pi, :, :, 0, fi],
+                            np.eye(self.Nants) + self.coupling[pi, :, :, 0, fi].conj().T
+                        )
+                    else:
+                        X = self.coupling[pi, :, :, 0, fi]
+                        coupling_matrix = np.eye(self.Nants) + X
+                        if multi_path:
+                            coupling_matrix += X.dot(X)
+                        
+                        # Use the pseudo-inverse of the coupling matrix
+                        inv_coupling_matrix = np.linalg.pinv(coupling_matrix)
 
-                # Get coupling parameters
-                X = self.coupling[pi, :, :, ti, fi]  # pi is the polarization index
+                for ti in data.times:
+                    # Load the data container in workable format and apply the coupling parameters.
+                    data_matrix = to_matrix(
+                        data, ti, fi, pol # TODO: Don't really like this
+                    )
+
+                    if first_order:
+                        if not self.is_time_invariant:
+                            # Get coupling parameters, pi is the polarization index
+                            X = self.coupling[pi, :, :, ti, fi]
+
+                            # Pre-compute the Sylvester solver for time-variant data
+                            solver = SylvesterSolver(
+                                X, np.eye(self.Nants) + X.conj().T
+                            )
+                        # Apply first-order coupling correction
+                        # This has the form V1 = V0 + V0 X^\dagger + (V0 X^\dagger)^dagger
+                        # which can be solved for using the the Stewart-Barlett algorithm
+                        decoupled_vis = solver.solve(data_matrix)
+
+                    else:
+                        if not self.is_time_invariant:
+                            # Get coupling parameters, pi is the polarization index
+                            X = self.coupling[pi, :, :, ti, fi]
+                            coupling_matrix = np.eye(self.Nants) + X
+                            if multi_path:
+                                coupling_matrix += X.dot(X)
+                            inv_coupling_matrix = np.linalg.pinv(coupling_matrix)
+
+                        # Apply full coupling correction
+                        decoupled_vis = np.dot(
+                            inv_coupling_matrix, data_matrix
+                        ).dot(np.conj(inv_coupling_matrix.T))
+
+                # Store the decoupled visibility data back into the DataContainer
+                # TODO: This is a placeholder, need to implement the actual storage logic
         
-                if first_order:
-                    # Apply first-order coupling correction
-                    # This has the form V1 = V0 + V0 X^\dagger + (V0 X^\dagger)^dagger
-                    # which can be solved for using the the Stewart-Barlett algorithm
-                    decoupled_vis = solve_stewart_barlett(X, data_matrix)
-
-                else:
-                    # Apply full coupling correction
-                    # This would involve a more complex operation, possibly involving matrix inversion
-                    coupling_matrix = np.eye(self.Nants) + X
-                    if multi_path:
-                        coupling_matrix = X.dot(X)
-
-                    # Do this once 
-                    pinv = np.linalg.pinv(coupling_matrix)
-
-                    decoupled_vis = np.linalg.solve(coupling_matrix, data_matrix)
+        return data
 
     def apply_coupling(self, data: DataContainer, first_order: bool=False, inplace: bool=False):
         """
@@ -235,10 +269,10 @@ class CouplingInflate:
         for i, ant1 in enumerate(self.ants):
             for j, ant2 in enumerate(self.ants):
                 vec = antpos[ant1] - antpos[ant2]
-                norm = np.linalg.norm(vecs - vec, axis=1)
+                norm = np.linalg.norm(coupling_vecs - vec, axis=1)
                 match = np.isclose(norm, 0, atol=redtol)
-                if norm.any():
-                    idx[i, j] = np.where(norm)[0]
+                if match.any():
+                    idx[i, j] = np.where(match)[0]
                 else:
                     zeros[i, j] = True
 
