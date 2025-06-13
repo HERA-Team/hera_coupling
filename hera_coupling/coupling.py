@@ -52,8 +52,8 @@ class UVCoupling:
         self._validate_shapes()
         
         # pre-compute the identity matrix along (Nants, Nants)
-        self.I = np.zeros(1, self.Nants, self.Nants, 1, 1)
-        self.I[:, range(self.Nants), range(self.Nants)] += 1
+        self.identity_matrix = np.zeros(1, self.Nants, self.Nants, 1, 1)
+        self.identity_matrix[:, range(self.Nants), range(self.Nants)] += 1
 
     def _validate_shapes(self):
         """Validate that all arrays have consistent shapes."""
@@ -166,12 +166,12 @@ class UVCoupling:
                             inv_coupling_matrix, data_matrix
                         ).dot(np.conj(inv_coupling_matrix.T))
 
-                # Store the decoupled visibility data back into the DataContainer
-                # TODO: This is a placeholder, need to implement the actual storage logic
+                    # Store the decoupled visibility data back into the DataContainer
+                    self.from_matrix(decoupled_vis, data, ti, fi, pol)
         
         return data
 
-    def apply_coupling(self, data: DataContainer, first_order: bool=False, inplace: bool=False):
+    def apply_coupling(self, data: DataContainer, first_order: bool=False, multi_path: bool=False, inplace: bool=False):
         """
         Apply the coupling parameters to the visibility data.
         TODO: Should we just use `hera_sim`?
@@ -183,6 +183,10 @@ class UVCoupling:
             The visibility data to which the coupling parameters will be applied.
         first_order : bool, optional
             If True, apply only first-order coupling terms. If False, use second order terms.
+        multi_path : bool, optional
+            If True, apply multi-path coupling corrections.
+        inplace : bool, optional
+            If True, modify the input data in place. If False, return a new DataContainer.
         
         Returns
         -------
@@ -192,24 +196,120 @@ class UVCoupling:
         # TODO:
         # Validate that the input data is compatible with the coupling parameters.
         # Should have the same number of antennas, frequencies, and times.
+        self._validate_data(data)
 
         # Copy the data if not inplace
         if not inplace:
             data = copy.deepcopy(data)
 
-        # Load the data container in workable format and apply the coupling parameters.
-        data_matrix = to_matrix(
-            data, ti, fi, pol # TODO: Don't really like this
-        )
+        for fi in range(self.Nfreqs):
+            for pi, pol in enumerate(data.pols):
+                for ti in range(self.Ntimes):
+                    # Load the data container in workable format and apply the coupling parameters.
+                    data_matrix = self.to_matrix(data, ti, fi, pol)
+                    X = self.coupling[pi, :, :, ti, fi]
+
+                    if first_order:
+                        coupled_vis = data_matrix + \
+                            data_matrix.dot(X.conj().T) + \
+                            (data_matrix.dot(X.conj().T)).conj().T
+                    else:
+                        coupling_matrix = np.eye(self.Nants) + X
+                        if multi_path:
+                            coupling_matrix += X.dot(X)
+
+                        coupled_vis = np.dot(coupling_matrix, data_matrix).dot(np.conj(coupling_matrix.T))
         
-        if first_order:
-            pass
-        else:
-            pass
+                    self.from_matrix(coupled_vis, data, ti, fi, pol)
         
         return data
+    
+    def to_matrix(self, data: DataContainer, time_idx: int, freq_idx: int, 
+                  pol: str) -> np.ndarray:
+        """
+        Convert DataContainer visibility data to matrix format.
+        
+        Parameters
+        ----------
+        data : DataContainer
+            Visibility data
+        time_idx : int
+            Time index
+        freq_idx : int 
+            Frequency index
+        pol : str
+            Polarization string
+            
+        Returns
+        -------
+        np.ndarray
+            Visibility matrix of shape (Nants, Nants)
+        """
+        # Create antenna index mapping
+        ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
+        
+        # Initialize visibility matrix
+        vis_matrix = np.zeros((self.Nants, self.Nants), dtype=complex)
+        
+        # Fill matrix from data
+        for bl in data.antpairs:
+            if pol in data[bl]:
+                ant1, ant2 = bl
+                i, j = ant_to_idx[ant1], ant_to_idx[ant2]
+                
+                # Get visibility data
+                vis_data = data[bl][pol]
+                if vis_data.ndim >= 2:
+                    vis_value = vis_data[time_idx, freq_idx] 
+                else:
+                    vis_value = vis_data[freq_idx]
+                    
+                vis_matrix[i, j] = vis_value
+                if i != j:  # Add conjugate for off-diagonal
+                    vis_matrix[j, i] = np.conj(vis_value)
+                    
+        return vis_matrix
+    
+    def from_matrix(self, vis_matrix: np.ndarray, data: DataContainer, 
+                   time_idx: int, freq_idx: int, pol: str):
+        """
+        Store matrix visibility data back into DataContainer.
+        
+        Parameters
+        ----------
+        vis_matrix : np.ndarray
+            Visibility matrix of shape (Nants, Nants)
+        data : DataContainer
+            DataContainer to modify
+        time_idx : int
+            Time index
+        freq_idx : int
+            Frequency index  
+        pol : str
+            Polarization string
+        """
+        ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
+        
+        for bl in data.bls:
+            if pol in data[bl]:
+                ant1, ant2 = bl
+                i, j = ant_to_idx[ant1], ant_to_idx[ant2]
+                
+                # Store visibility data
+                if data[bl][pol].ndim >= 2:
+                    data[bl][pol][time_idx, freq_idx] = vis_matrix[i, j]
+                else:
+                    data[bl][pol][freq_idx] = vis_matrix[i, j]
 
     def write_npz(self):
+        """
+        TODO: Write the coupling parameters to an NPZ file.
+
+        What are the necessary key-value pairs to store?
+            - coupling: ndarray
+            - Antenna names: ndarray
+            - Antenna positions: dict
+        """
         raise NotImplementedError
 
     @classmethod
