@@ -5,6 +5,7 @@ from hera_cal.datacontainer import DataContainer
 
 from .solvers import SylvesterSolver
 
+
 class UVCoupling:
     """
     A data format for semi-analytic mutual coupling parameters.
@@ -168,7 +169,7 @@ class UVCoupling:
 
                     # Store the decoupled visibility data back into the DataContainer
                     self.from_matrix(decoupled_vis, data, ti, fi, pol)
-        
+
         return data
 
     def apply_coupling(self, data: DataContainer, first_order: bool=False, multi_path: bool=False, inplace: bool=False):
@@ -187,7 +188,7 @@ class UVCoupling:
             If True, apply multi-path coupling corrections.
         inplace : bool, optional
             If True, modify the input data in place. If False, return a new DataContainer.
-        
+
         Returns
         -------
         DataContainer
@@ -337,11 +338,37 @@ def to_matrix(data: DataContainer):
     raise NotImplementedError("to_matrix function is not implemented yet.")
 
 
-class CouplingInflate:
+def coupling_inflate(coupling, coupling_vecs, antpos, redtol=1.0):
     """
     Take a redundantly-compressed coupling parameter vector
     and inflate it to an Nants x Nants coupling matrix,
     with antenna ordering set by antpos.
+
+    Parameters
+    ----------
+    coupling : ndarray
+        Coupling parameter of shape (Npol, Nred, Ntimes, Nfreqs)
+    coupling_vecs : ndarray
+        Coupling term baseline vectors,
+        shape (Nterms, 3) in ENU [meters]
+    antpos : dict
+        Antenna position dictionary
+    redtol : float
+        Redundancy tolerance [meters]
+
+    Returns
+    -------
+    ndarray
+    """
+    return CouplingInflate(coupling_vecs, antpos, redtol=redtol)(coupling)
+
+
+class CouplingInflate:
+    """
+    Take a redundantly-compressed coupling parameter vector
+    and inflate it to an Nants x Nants coupling matrix,
+    with antenna ordering set by antpos. Use this over
+    the coupling_inflate() function for repeated calls.
     """
     def __init__(self, coupling_vecs, antpos, redtol=1.0):
         """
@@ -363,7 +390,7 @@ class CouplingInflate:
         self.shape = (Nants, Nants)
 
         idx = np.zeros(self.shape, dtype=np.int64)
-        zeros = np.zeros(self.shape, dtype=np.bool)
+        zeros = np.zeros(self.shape, dtype=bool)
 
         # iterate over antenna-pairs
         for i, ant1 in enumerate(self.ants):
@@ -381,13 +408,13 @@ class CouplingInflate:
 
     def __call__(self, coupling):
         # coupling = (Npol, Nvec, Ntimes, Nfreqs)
-        shape = coupling.shape[:2] + self.shape + coupling.shape[-2:]
+        shape = coupling.shape[:1] + self.shape + coupling.shape[-2:]
 
         # coupling = (Npol, Nant^2, Ntimes, Nfreqs)
-        coupling = coupling[:, :, self.idx]
+        coupling = coupling[:, self.idx]
 
         # zero-out missing vectors
-        coupling[:, :, self.zeros] = 0.0
+        coupling[:, self.zeros] = 0.0
 
         # coupling = (Npol, Nant, Nant, Ntimes, Nfreqs)
         coupling = coupling.reshape(shape)
