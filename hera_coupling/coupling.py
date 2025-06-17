@@ -3,7 +3,7 @@ import numpy as np
 from typing import Dict, Optional
 from hera_cal.datacontainer import DataContainer
 
-from .utils import SylvesterSolver
+from .solvers import SylvesterSolver
 
 class UVCoupling:
     """
@@ -405,5 +405,41 @@ class RedCouplingAvg:
 
     def __call__(self, params):
         pass
+
+
+def expand_coupling(coupling, ants, new_ants):
+    """
+    Expand coupling parameter to a new set of antennas.
+
+    Parameters
+    ----------
+    coupling : ndarray
+        Coupling of shape (Npols, Nants, Nants, Ntimes, Nfreqs)
+    ants : list
+        List of antenna IDs for coupling
+    new_ants : list
+        Set of new antenna IDs to expand coupling to.
+
+    Returns
+    -------
+    ndarray
+    """
+    # get all antennas and setup empty coupling output
+    Nants = len(new_ants)
+
+    # get indexing
+    if isinstance(ants, np.ndarray):
+        ants = ants.tolist()
+    idx = [ants.index(a) if a in ants else -1 for a in new_ants]
+
+    # expand to new coupling parameter
+    coupling = coupling[:, idx][:, :, idx]
+
+    # zero out missing antennas
+    zero = np.where(np.array(idx) == -1)[0]
+    coupling[:, zero] = 0
+    coupling[:, :, zero] = 0
+
+    return coupling
 
 
