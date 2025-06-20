@@ -175,20 +175,23 @@ class UVCoupling:
         self.ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
         self.idx_to_ant = {i: ant for ant, i in self.ant_to_idx.items()}
 
+        self.set_production(False)
+
     def _validate_shapes(self):
         """Validate that all arrays have consistent shapes."""
-        expected_shape = (len(self.pols), self.Nants, self.Nants, 
-                         self.Ntimes, self.Nfreqs)
-        
-        if self.coupling.shape != expected_shape:
-            raise ValueError(f"coupling shape {self.coupling.shape} doesn't match "
-                           f"expected {expected_shape}")
-                           
-        if self.freqs is not None and len(self.freqs) != self.Nfreqs:
-            raise ValueError(f"freqs length {len(self.freqs)} != Nfreqs {self.Nfreqs}")
+        if not self.production:
+            expected_shape = (len(self.pols), self.Nants, self.Nants, 
+                             self.Ntimes, self.Nfreqs)
             
-        if self.times is not None and len(self.times) != self.Ntimes:
-            raise ValueError(f"times length {len(self.times)} != Ntimes {self.Ntimes}")
+            if self.coupling.shape != expected_shape:
+                raise ValueError(f"coupling shape {self.coupling.shape} doesn't match "
+                               f"expected {expected_shape}")
+                               
+            if self.freqs is not None and len(self.freqs) != self.Nfreqs:
+                raise ValueError(f"freqs length {len(self.freqs)} != Nfreqs {self.Nfreqs}")
+                
+            if self.times is not None and len(self.times) != self.Ntimes:
+                raise ValueError(f"times length {len(self.times)} != Ntimes {self.Ntimes}")
         
     def _validate_data(self, data: DataContainer):
         """
@@ -204,19 +207,31 @@ class UVCoupling:
         ValueError
             If the data does not match the expected shapes or dimensions.
         """
-        ## TODO: support UVData object, and plain ndarray of shape (Nbltimes, Nfreqs)
-        if data.Nants != self.Nants:
-            raise ValueError(f"Data has {data.Nants} antennas, but coupling has {self.Nants} antennas.")
-        
-        if data.Nfreqs != self.coupling.shape[-1]:
-            raise ValueError(f"Data has {data.Nfreqs} frequencies, but coupling has {self.coupling.shape[-1]} frequencies.")
-        
-        if data.Ntimes != self.coupling.shape[-2]:
-            raise ValueError(f"Data has {data.Ntimes} times, but coupling has {self.coupling.shape[-2]} times.")
-        
-        if data.pols is not None and len(data.pols) != self.coupling.shape[0]:
-            raise ValueError(f"Data has {len(data.pols)} polarizations, but coupling has {self.coupling.shape[0]} polarizations.")
+        if not self.production:
+            ## TODO: support UVData object, and plain ndarray of shape (Nbltimes, Nfreqs)
+            if data.Nants != self.Nants:
+                raise ValueError(f"Data has {data.Nants} antennas, but coupling has {self.Nants} antennas.")
+            
+            if data.Nfreqs != self.coupling.shape[-1]:
+                raise ValueError(f"Data has {data.Nfreqs} frequencies, but coupling has {self.coupling.shape[-1]} frequencies.")
+            
+            if data.Ntimes != self.coupling.shape[-2]:
+                raise ValueError(f"Data has {data.Ntimes} times, but coupling has {self.coupling.shape[-2]} times.")
+            
+            if data.pols is not None and len(data.pols) != self.coupling.shape[0]:
+                raise ValueError(f"Data has {len(data.pols)} polarizations, but coupling has {self.coupling.shape[0]} polarizations.")
 
+    def set_production(self, production):
+        """
+        If running in production mode (no data validation)
+
+        Parameters
+        ----------
+        production : bool
+        """
+        self.production = production
+
+    def invert(self, data: DataContainer, first_order: bool=False, multi_path: bool=False, inplace: bool=False):
     def invert(self) -> None:
         """
         """
@@ -253,7 +268,8 @@ class UVCoupling:
         # TODO:
         # Validate that the input data is compatible with the coupling parameters.
         # Should have the same number of antennas, frequencies, and times.
-        # Should allow this to be either DataContainer or np.ndarray object.
+        # TODO: should be able to deactivate these checks with self.production = True
+        #   with self.set_production(True)
         self._validate_data(data)
 
         # Copy the data if not inplace
@@ -299,6 +315,12 @@ class UVCoupling:
         np.ndarray
             Visibility matrix of shape (Nants, Nants)
         """
+        # TODO: make this a module function, not method
+        # TODO: support UVData and plain ndarray
+
+        # Create antenna index mapping
+        ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
+        
         # Initialize visibility matrix
         vis_matrix = np.zeros((self.Nants, self.Nants), dtype=complex)
         
@@ -344,7 +366,11 @@ class UVCoupling:
             Frequency index  
         pol : str
             Polarization string
-        """    
+        """
+        # TODO: make this a module function, not a method
+        # TODO: support UVData and ndarray
+        ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
+        
         for bl in data.bls:
             if pol in data[bl]:
                 ant1, ant2 = bl
