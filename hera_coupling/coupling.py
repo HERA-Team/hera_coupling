@@ -41,7 +41,7 @@ class UVCoupling:
         first_order : bool, optional
             Whether to treat coupling as first-order only.
         """
-        self.coupling = CouplingOperator(coupling, first_order=first_order)
+        self.coupling = coupling
         self.antpos = dict(antpos)
         self.freqs = freqs
         self.times = times  
@@ -57,6 +57,7 @@ class UVCoupling:
         # Check if coupling is time-invariant
         self._is_time_invariant = (coupling.shape[-2] == 1)  # Default to time-invariant
         self._inverted = inverted
+        self._inversion_cache = {}  # Cache for inverted coupling if needed
 
         # Validate shapes
         self._validate_shapes()
@@ -140,15 +141,13 @@ class UVCoupling:
         """
         self.production = production
 
-    def invert(self) -> None:
+    def invert(self, first_order, multi_path) -> None:
         """
         """
         # TODO:
-        # 1. Validate that the input data is compatible with the coupling parameters.
-        # 2. Should have the same number of antennas, frequencies, and times.
-        # 3. We may want to invert this once and store it, as such
-        # we may want to have self.inverted = True/False and have this function
-        # return UVCoupling(pinv(coupling), ...), and then have the
+        # 1. We may want to invert this once and store it, as such
+        #    we may want to have self.inverted = True/False and have this function
+        #    return UVCoupling(pinv(coupling), ...), and then have the
         # 
         # TODO: we shoudl probably cache based on the assumption of first order / multi-path
         if self.first_order:
@@ -205,97 +204,6 @@ class UVCoupling:
         
         return data
     
-    def _extract_data_matrix(
-            self, 
-            data: DataContainer, 
-            time_idx: int, 
-            freq_idx: int, 
-            pol: str
-        ) -> np.ndarray:
-        """
-        Extract visibility matrix from DataContainer.
-        
-        Parameters
-        ----------
-        data : DataContainer
-            Visibility data
-        time_idx : int
-            Time index
-        freq_idx : int 
-            Frequency index
-        pol : str
-            Polarization string
-            
-        Returns
-        -------
-        np.ndarray
-            Visibility matrix of shape (Nants, Nants)
-        """
-        # TODO: make this a module function, not method
-        # TODO: support UVData and plain ndarray
-
-        # Create antenna index mapping
-        ant_to_idx = {ant: i for i, ant in enumerate(self.ants)}
-        
-        # Initialize visibility matrix
-        vis_matrix = np.zeros((self.Nants, self.Nants), dtype=complex)
-        
-        # Fill matrix from data
-        for bl in data.antpairs:
-            if pol in data[bl]:
-                ant1, ant2 = bl
-                i, j = self.ant_to_idx[ant1], self.ant_to_idx[ant2]
-                
-                # Get visibility data
-                vis_data = data[bl][pol]
-                if vis_data.ndim >= 2:
-                    vis_value = vis_data[time_idx, freq_idx] 
-                else:
-                    vis_value = vis_data[freq_idx]
-                    
-                vis_matrix[i, j] = vis_value
-                if i != j:  # Add conjugate for off-diagonal
-                    vis_matrix[j, i] = np.conj(vis_value)
-                    
-        return vis_matrix
-    
-    def _insert_data_matrix(
-            self, 
-            vis_matrix: np.ndarray, 
-            data: DataContainer, 
-            time_idx: int, 
-            freq_idx: int, 
-            pol: str
-        ) -> None:
-        """
-        Insert matrix visibility data back into DataContainer.
-        
-        Parameters
-        ----------
-        vis_matrix : np.ndarray
-            Visibility matrix of shape (Nants, Nants)
-        data : DataContainer
-            DataContainer to modify
-        time_idx : int
-            Time index
-        freq_idx : int
-            Frequency index  
-        pol : str
-            Polarization string
-        """
-        # TODO: make this a module function, not a method
-        # TODO: support UVData and ndarray
-        for bl in data.bls:
-            if pol in data[bl]:
-                ant1, ant2 = bl
-                i, j = self.ant_to_idx[ant1], self.ant_to_idx[ant2]
-                
-                # Store visibility data
-                if data[bl][pol].ndim >= 2:
-                    data[bl][pol][time_idx, freq_idx] = vis_matrix[i, j]
-                else:
-                    data[bl][pol][freq_idx] = vis_matrix[i, j]
-
     def write(self, filename: str, **kwargs) -> None:
         """
         TODO: Write the coupling parameters to an NPZ file.
@@ -347,21 +255,177 @@ class UVCoupling:
         )
         raise uvcoupling
     
-    def copy(self) -> "UVCoupling":
-        """Create a deep copy of the coupling operator."""
-        uvc = UVCoupling(
-            coupling=self.coupling.copy(),
-            antpos=self.antpos,
-            freqs=self.freqs,
-            times=self.times,
-            pols=self.pols,
-            metadata=self.metadata.copy(),
-        )
-        return uvc
+def _extract_data_matrix(
+    data: DataContainer, 
+    time_idx: int, 
+    freq_idx: int, 
+    pol: str
+) -> np.ndarray:
+    """
+    Extract visibility matrix from DataContainer.
+    
+    Parameters
+    ----------
+    data : DataContainer
+        Visibility data
+    time_idx : int
+        Time index
+    freq_idx : int 
+        Frequency index
+    pol : str
+        Polarization string
+        
+    Returns
+    -------
+    np.ndarray
+        Visibility matrix of shape (Nants, Nants)
+    """
+    # TODO: make this a module function, not method
+    # TODO: support UVData and plain ndarray
+
+    # Create antenna index mapping
+    ant_to_idx = {ant: i for i, ant in enumerate(ants)}
+    
+    # Initialize visibility matrix
+    vis_matrix = np.zeros((Nants, Nants), dtype=complex)
+    
+    # Fill matrix from data
+    for bl in data.antpairs:
+        if pol in data[bl]:
+            ant1, ant2 = bl
+            i, j = ant_to_idx[ant1], ant_to_idx[ant2]
+            
+            # Get visibility data
+            vis_data = data[bl][pol]
+            if vis_data.ndim >= 2:
+                vis_value = vis_data[time_idx, freq_idx] 
+            else:
+                vis_value = vis_data[freq_idx]
+                
+            vis_matrix[i, j] = vis_value
+            if i != j:  # Add conjugate for off-diagonal
+                vis_matrix[j, i] = np.conj(vis_value)
+                
+    return vis_matrix
+
+def _insert_data_matrix(
+    vis_matrix: np.ndarray, 
+    data: DataContainer, 
+    time_idx: int, 
+    freq_idx: int, 
+    pol: str
+) -> None:
+    """
+    Insert matrix visibility data back into DataContainer.
+    
+    Parameters
+    ----------
+    vis_matrix : np.ndarray
+        Visibility matrix of shape (Nants, Nants)
+    data : DataContainer
+        DataContainer to modify
+    time_idx : int
+        Time index
+    freq_idx : int
+        Frequency index  
+    pol : str
+        Polarization string
+    """
+    # TODO: support UVData and ndarray
+    for bl in data.bls:
+        if pol in data[bl]:
+            ant1, ant2 = bl
+            i, j = ant_to_idx[ant1], ant_to_idx[ant2]
+            
+            # Store visibility data
+            if data[bl][pol].ndim >= 2:
+                data[bl][pol][time_idx, freq_idx] = vis_matrix[i, j]
+            else:
+                data[bl][pol][freq_idx] = vis_matrix[i, j]
+
+
+def _apply_coupling_forward(
+    data,
+    uvcoupling: UVCoupling,
+    first_order: bool = False,
+    multi_path: bool = False,
+    inplace: bool = False
+):
+    """
+    Apply coupling parameters to visibility data in forward mode.
+    """
+    # Build an identity matrix for the number of antennas
+    nants = uvcoupling.Nants
+    identity = np.eye(nants, dtype=np.complex128)
+
+    for ti in range(uvcoupling.Ntimes):
+        for fi in range(uvcoupling.Nfreqs):
+            for pi, pol in enumerate(uvcoupling.pols):
+                # Extract the visibility matrix for the current time, frequency, and polarization
+                vis_matrix = _extract_data_matrix(uvcoupling, data, ti, fi, pol)
+                coupling_matrix = uvcoupling.coupling[pi, :, :, ti, fi]
+
+                if multi_path and not first_order:
+                    # If multi-path coupling is enabled, we need to dot the coupling matrix with itself
+                    coupling_matrix += coupling_matrix.dot(coupling_matrix)
+
+
+                # Apply the coupling parameters
+                if first_order:
+                    # Apply first-order coupling
+                    coupled_vis = (
+                        vis_matrix +
+                        np.dot(vis_matrix, coupling_matrix.T.conj()) + 
+                        np.dot(vis_matrix, coupling_matrix.T.conj()).T.conj()
+                    )
+                    
+                else:
+                    # Apply second-order or higher coupling
+                    coupling_matrix += identity
+                    coupled_vis = np.dot(
+                        np.dot(coupling_matrix, vis_matrix),
+                        coupling_matrix.T.conj()
+                    )
+
+                # Insert the modified visibility matrix back into the DataContainer
+                _insert_data_matrix(coupled_vis, data, ti, fi, pol)
+
+def _apply_coupling_inverse(
+    data,
+    uvcoupling: UVCoupling,
+    first_order: bool = False,
+    multi_path: bool = False,
+    inplace: bool = False
+):
+    """
+    Apply coupling parameters to visibility data in reverse mode.
+    """
+    # Invert the coupling parameters if not already inverted
+    if not uvcoupling.is_inverted:
+        uvcoupling.invert(first_order, multi_path)
+
+    for fi in range(uvcoupling.Nfreqs):
+        for pi, pol in enumerate(uvcoupling.pols):
+                for ti in range(uvcoupling.Ntimes):
+                    
+                    # Extract the visibility matrix for the current time, frequency, and polarization
+                    vis_matrix = _extract_data_matrix(uvcoupling, data, ti, fi, pol)
+        
+                    # Apply the coupling parameters
+                    if first_order:
+                        # Apply first-order coupling
+                        coupled_vis = np.dot(vis_matrix, uvcoupling.coupling[pi, :, :, ti, fi].T.conj())
+                    else:
+                        # Apply second-order or higher coupling
+                        coupled_vis = np.dot(vis_matrix, uvcoupling.coupling[pi, :, :, ti, fi])
+
+                    # Insert the modified visibility matrix back into the DataContainer
+                    _insert_data_matrix(coupled_vis, data, ti, fi, pol)
 
 def apply_coupling(
     data: DataContainer | np.ndarray,
     uvcoupling: UVCoupling,
+    forward: bool = False,
     first_order: bool = False,
     multi_path: bool = False,
     inplace: bool = False,
@@ -378,6 +442,12 @@ def apply_coupling(
         Visibility data to which the coupling parameters will be applied.
     uvcoupling : UVCoupling
         UVCoupling object containing coupling parameters.
+    forward : bool, optional
+        If True, apply coupling in forward mode (default is False, which applies in reverse mode).
+    first_order : bool, optional
+        If True, apply only first-order coupling terms. If False, use second-order terms.
+    multi_path : bool, optional
+        If True, apply multi-path coupling corrections.
     inplace : bool, optional
         If True, modify the input data in place. If False, return a new DataContainer.
         Default is False.
@@ -387,31 +457,29 @@ def apply_coupling(
     DataContainer
         Visibility data with coupling applied.
     """
-    nants = uvcoupling.nants  # Number of antennas
+    # Validate the input data against the coupling parameters
+    uvcoupling._validate_data(data) # Probably should be a method outside of UVCoupling
+
+    # Number of antennas
+    nants = uvcoupling.nants  
+
     # Get identity matrix for the number of antennas
-    
-    # Broadcast identity to match coupling shape
     identity = np.eye(nants, dtype=np.complex128)
     identity_shape = list(uvcoupling.shape)
     identity = np.broadcast_to(identity, identity_shape)
 
-    # Apply the coupling parameters to the visibility data
-    if not isinstance(data, np.ndarray):
-        raise TypeError("data must be a numpy ndarray")
+    if not inplace:
+        # Create a deep copy of the data if not inplace
+        data = copy.deepcopy(data)
     
-    if not uvcoupling.first_order:
-        # For if coupling has second-order or higher terms,
-        # we apply the full coupling matrix
-        return np.dot(uvcoupling, data).dot(np.conj(uvcoupling.coupling.T))
+    if forward:
+        # Apply coupling in forward mode
+        _apply_coupling_forward(data, uvcoupling, first_order, multi_path, inplace)
     else:
-        # For first-order coupling, we apply the first-order terms
-        if uvcoupling.is_inverted:
-            # If already inverted, solve for the decoupled data using Sylvester's equation
-            solution = ...  # Placeholder for Sylvester's equation solver
-            return solution
-        else:
-            # If not inverted, apply the first-order coupling directly
-            return np.dot(data, uvcoupling.T.conj()) + np.dot(data, (uvcoupling - identity).T.conj())
+        # Apply coupling in reverse mode
+        _apply_coupling_inverse(data, uvcoupling, first_order, multi_path, inplace)
+
+    return data
 
 
 def coupling_inflate(coupling, coupling_vecs, antpos, redtol=1.0):
