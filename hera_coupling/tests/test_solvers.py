@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.linalg import solve_sylvester
-from hera_coupling.utils import SylvesterSolver
+from hera_coupling.solvers import SylvesterSolver
 
 def test_sylvester_solver():
     nants = 5
