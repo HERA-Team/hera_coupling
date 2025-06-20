@@ -231,7 +231,6 @@ class UVCoupling:
         """
         self.production = production
 
-    def invert(self, data: DataContainer, first_order: bool=False, multi_path: bool=False, inplace: bool=False):
     def invert(self) -> None:
         """
         """
