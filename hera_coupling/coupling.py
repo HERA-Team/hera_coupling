@@ -1,3 +1,4 @@
+import h5py
 import copy
 import numpy as np
 from scipy import linalg
@@ -98,13 +99,13 @@ class UVCoupling:
         """
         if not self.production:
             ## TODO: support UVData object, and plain ndarray of shape (Nbltimes, Nfreqs)
-            if data.Nants != self.Nants:
+            if len(data.ants) != self.Nants:
                 raise ValueError(f"Data has {data.Nants} antennas, but coupling has {self.Nants} antennas.")
             
-            if data.Nfreqs != self.coupling.shape[-1]:
+            if len(data.freqs) != self.coupling.shape[-1]:
                 raise ValueError(f"Data has {data.Nfreqs} frequencies, but coupling has {self.coupling.shape[-1]} frequencies.")
             
-            if data.Ntimes != self.coupling.shape[-2]:
+            if not self.is_time_invariant and len(data.times) != self.coupling.shape[-2]:
                 raise ValueError(f"Data has {data.Ntimes} times, but coupling has {self.coupling.shape[-2]} times.")
             
             if data.pols is not None and len(data.pols) != self.coupling.shape[0]:
@@ -229,9 +230,9 @@ class UVCoupling:
             inplace=inplace
         )
 
-    def write(self, filename: str, **kwargs) -> None:
+    def write_coupling(self, filename: str, **kwargs) -> None:
         """
-        TODO: Write the coupling parameters to an NPZ file.
+        TODO: Write the coupling parameters to an hdf5 file.
 
         What are the necessary key-value pairs to store?
             - coupling: ndarray
@@ -243,7 +244,7 @@ class UVCoupling:
         raise NotImplementedError
 
     @classmethod
-    def read(cls, filename: str, **kwargs) -> "UVCoupling":
+    def read_coupling(cls, filename: str, **kwargs) -> "UVCoupling":
         """
         Read coupling parameters from a file and return a UVCoupling object.
 
@@ -411,7 +412,7 @@ def _apply_coupling_forward(
         for fi in range(uvcoupling.Nfreqs):
             for pi, pol in enumerate(uvcoupling.pols):
                 # Extract the visibility matrix for the current time, frequency, and polarization
-                vis_matrix = _extract_data_matrix(uvcoupling, data, ti, fi, pol)
+                vis_matrix = _extract_data_matrix(data, uvcoupling.antpos, ti, fi, pol)
                 coupling_matrix = uvcoupling.coupling[pi, :, :, ti, fi]
 
                 if multi_path and not first_order:
@@ -474,7 +475,7 @@ def _apply_coupling_inverse(
                 )
             for ti in range(uvcoupling.Ntimes):
                 # Extract the visibility matrix for the current time, frequency, and polarization
-                vis_matrix = _extract_data_matrix(uvcoupling, data, ti, fi, pol)
+                vis_matrix = _extract_data_matrix(data, uvcoupling.antpos, ti, fi, pol)
     
                 # Apply the coupling parameters
                 if first_order:
@@ -544,10 +545,20 @@ def apply_coupling(
     
     if forward:
         # Apply coupling in forward mode
-        _apply_coupling_forward(data, uvcoupling, first_order, multi_path, inplace)
+        _apply_coupling_forward(
+            data=data, 
+            uvcoupling=uvcoupling, 
+            first_order=first_order, 
+            multi_path=multi_path
+        )
     else:
         # Apply coupling in reverse mode
-        _apply_coupling_inverse(data, uvcoupling, first_order, multi_path, inplace)
+        _apply_coupling_inverse(
+            data=data, 
+            uvcoupling=uvcoupling, 
+            first_order=first_order, 
+            multi_path=multi_path, 
+        )
 
     return data
 
