@@ -1,5 +1,8 @@
 import pytest
 import numpy as np
+from copy import deepcopy
+
+# Import hera modules
 import hera_coupling as hm
 from hera_coupling import UVCoupling
 from hera_cal.datacontainer import DataContainer
@@ -96,10 +99,20 @@ class TestApplyCoupling:
 		self.freqs = np.linspace(100e6, 200e6, self.nfreqs)
 		self.times = np.linspace(2458168.1, 2458168.3, self.ntimes)
 
-		shape = (2, self.nants, self.nants, self.ntimes, self.nfreqs)
+		shape = (2, self.nants, self.nants, 1, self.nfreqs)
 		coupling = np.random.normal(0, 1e-1, shape) + 0j
 		coupling = (np.swapaxes(coupling, 1, 2).conj() + coupling) / 2
 		self.uvc = UVCoupling(
+			coupling=coupling,
+			antpos=self.antpos,
+			freqs=self.freqs,
+			pols=self.pols,
+		)
+
+		shape = (2, self.nants, self.nants, self.ntimes, self.nfreqs)
+		coupling = np.random.normal(0, 1e-1, shape) + 0j
+		coupling = (np.swapaxes(coupling, 1, 2).conj() + coupling) / 2
+		self.uvc_time_varying = UVCoupling(
 			coupling=coupling,
 			antpos=self.antpos,
 			freqs=self.freqs,
@@ -148,3 +161,46 @@ class TestApplyCoupling:
 		for key in uncoupled_data:
 			# Check if the uncoupled data matches the original data
 			assert np.allclose(uncoupled_data[key], self.data[key], atol=1e-10), f"Data mismatch for key {key}"
+
+		coupled_data = self.uvc_time_varying.apply(
+			self.data, 
+			forward=True,
+			first_order=first_order,
+			multi_path=multi_path,
+			inplace=False
+		)
+
+		uncoupled_data = self.uvc_time_varying.apply(
+			coupled_data, 
+			forward=False,
+			first_order=first_order,
+			multi_path=multi_path,
+			inplace=False
+		)
+
+		for key in uncoupled_data:
+			# Check if the uncoupled data matches the original data
+			assert np.allclose(uncoupled_data[key], self.data[key], atol=1e-10), f"Data mismatch for key {key}"
+
+	@pytest.mark.parametrize("first_order", [True, False])
+	@pytest.mark.parametrize("multi_path", [True, False])
+	def test_inverse(self, first_order, multi_path):
+		uvc = deepcopy(self.uvc)
+		uvc_time_varying = deepcopy(self.uvc_time_varying)
+		
+		# Invert the coupling
+		uvc.invert(first_order=first_order, multi_path=multi_path)
+		uvc_time_varying.invert(first_order=first_order, multi_path=multi_path)
+
+		if not first_order:
+			# Check if the coupling matrix is Hermitian
+			assert uvc.is_inverted, "Coupling should be inverted"
+			assert uvc.inverse_coupling.shape == uvc.coupling.shape, "Inverse coupling shape mismatch" 
+			assert uvc_time_varying.is_inverted, "Coupling should be inverted"
+			assert uvc_time_varying.inverse_coupling.shape == uvc_time_varying.coupling.shape, "Inverse coupling shape mismatch" 
+		else:
+			# For first order, Sylvester solver is used, so 
+			assert not uvc.is_inverted, "First order coupling should not be inverted"
+			assert not hasattr(uvc, "inverse_coupling"), "First order coupling should not have inverse_coupling attribute"
+			assert not uvc_time_varying.is_inverted, "First order coupling should not be inverted"
+			assert not hasattr(uvc_time_varying, "inverse_coupling"), "First order coupling should not have inverse_coupling attribute"
