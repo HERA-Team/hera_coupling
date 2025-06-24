@@ -1,6 +1,8 @@
+import pytest
 import numpy as np
-
 import hera_coupling as hm
+from hera_coupling import UVCoupling
+from hera_cal.datacontainer import DataContainer
 
 try:
 	import symengine as sympy
@@ -79,4 +81,70 @@ def test_apply_coupling_sympy():
 	#r = vout[[bl for bl in vout.bls]] / np.array([Vc[bl[0], bl[1]] for bl in vout.bls])
 	assert np.isclose(r, 1 + 0j, atol=1e-10).all()
 
+class TestApplyCoupling:
+	def setup_method(self):
+		# Initialize the coupling with some dummy data
+		self.nants = 10
+		self.nfreqs = 5
+		self.ntimes = 2
+		self.pols = ['ee', 'nn']
 
+		self.antpos = {
+			i: np.array([i, 0, 0])
+			for i in range(self.nants)
+		}
+		self.freqs = np.linspace(100e6, 200e6, self.nfreqs)
+		self.times = np.linspace(2458168.1, 2458168.3, self.ntimes)
+
+		shape = (2, self.nants, self.nants, self.ntimes, self.nfreqs)
+		coupling = np.random.normal(0, 1e-1, shape) + 0j
+		coupling = (np.swapaxes(coupling, 1, 2).conj() + coupling) / 2
+		self.uvc = UVCoupling(
+			coupling=coupling,
+			antpos=self.antpos,
+			freqs=self.freqs,
+			pols=self.pols,
+		)
+
+		self.data = {
+			(i, j, pol): np.random.normal(0, 1, size=(self.ntimes, self.nfreqs)) + 0j
+			for i in range(self.nants)
+			for j in range(i)
+			for pol in self.pols
+		}
+
+		for pol in self.pols:
+			d = np.random.uniform(0, 1, size=(self.ntimes, self.nfreqs)) + 0j
+			for i in range(len(self.antpos)):
+				self.data[(i, i, pol)] = np.copy(d)
+		
+		self.data = DataContainer(self.data)
+		self.data.antpos = self.antpos
+		self.data.ants = list(self.antpos.keys())
+		self.data.freqs = self.freqs
+		self.data.times = self.times
+		self.data.pols = self.pols
+
+	@pytest.mark.parametrize("first_order", [True, False])
+	@pytest.mark.parametrize("multi_path", [True, False])
+	def test_invert_coupling(self, first_order, multi_path):
+		# Invert the coupling
+		coupled_data = self.uvc.apply(
+			self.data, 
+			forward=True,
+			first_order=first_order,
+			multi_path=multi_path,
+			inplace=False
+		)
+
+		uncoupled_data = self.uvc.apply(
+			coupled_data, 
+			forward=False,
+			first_order=first_order,
+			multi_path=multi_path,
+			inplace=False
+		)
+
+		for key in uncoupled_data:
+			# Check if the uncoupled data matches the original data
+			assert np.allclose(uncoupled_data[key], self.data[key], atol=1e-10), f"Data mismatch for key {key}"
