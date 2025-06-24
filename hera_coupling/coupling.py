@@ -399,7 +399,7 @@ def _apply_coupling_forward(
     identity = uvcoupling.identity_matrix
     
     for pi, pol in enumerate(uvcoupling.pols):
-        for ti in range(uvcoupling.ntimes):
+        for ti, time in enumerate(data.times):
             if isinstance(data, DataContainer):
                 vis_matrix = _extract_data_matrix(
                     data=data, 
@@ -412,7 +412,7 @@ def _apply_coupling_forward(
                 vis_matrix = data[pi, :, :, ti, :]
 
             coupled_vis = np.zeros_like(vis_matrix)
-            for fi in range(uvcoupling.nfreqs):
+            for fi, freq in enumerate(data.freqs):
                 # Extract the visibility matrix for the current time, frequency, and polarization
                 if uvcoupling.is_time_invariant:
                     # If time-invariant, use the first frequency index
@@ -488,7 +488,7 @@ def _apply_coupling_inverse(
 
     
     for pi, pol in enumerate(uvcoupling.pols):
-        for ti in range(uvcoupling.ntimes):
+        for ti, time in enumerate(data.times):
             if isinstance(data, DataContainer):
                 # Extract the visibility matrix for the current time and polarization
                 vis_matrix = _extract_data_matrix(
@@ -502,7 +502,7 @@ def _apply_coupling_inverse(
                 vis_matrix = data[pi, :, :, ti, :]
 
             uncoupled_vis = np.zeros_like(vis_matrix)
-            for fi in range(uvcoupling.nfreqs):
+            for fi, freq in enumerate(data.freqs):
                 # Apply the coupling parameters
                 if first_order:
                     if uvcoupling.is_time_invariant:
