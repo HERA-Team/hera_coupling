@@ -32,6 +32,7 @@ dependencies = [
     "numpy",
     "scipy",
     "h5py",
+    "hera_cal",
 ]
 
 [project.optional-dependencies]
