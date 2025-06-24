@@ -4,6 +4,9 @@ import numpy as np
 from scipy import linalg
 from typing import Dict, Optional, Union, List, Tuple
 from hera_cal.datacontainer import DataContainer
+from pathlib import Path
+
+from ._version import version
 
 class UVCoupling:
     """
@@ -17,8 +20,8 @@ class UVCoupling:
             coupling: np.ndarray,
             antpos: Dict[int, np.ndarray],
             freqs: np.ndarray,
+            pols: List[str],
             times: Optional[np.ndarray] = None,
-            pols: Optional[List[str]] = None,
             metadata: Optional[Dict] = None,
         ):
         """
@@ -32,10 +35,10 @@ class UVCoupling:
             Antenna positions in ENU coordinates [meters]. Keys are antenna numbers.
         freqs : np.ndarray
             Frequency array in Hz.
+        pols : List[str]
+            Polarization strings (e.g., ['ee', 'nn']).
         times : np.ndarray, optional
             Time array in JD. Required if Ntimes > 1.
-        pols : List[str], optional
-            Polarization strings (e.g., ['ee', 'nn']).
         metadata : Dict, optional
             Additional metadata dictionary.
         """
@@ -117,8 +120,9 @@ class UVCoupling:
             if not self.is_time_invariant and len(data.times) != self.coupling.shape[-2]:
                 raise ValueError(f"Data has {data.ntimes} times, but coupling has {self.coupling.shape[-2]} times.")
             
-            if data.pols is not None and len(data.pols) != self.coupling.shape[0]:
-                raise ValueError(f"Data has {len(data.pols)} polarizations, but coupling has {self.coupling.shape[0]} polarizations.")
+            for pol in self.pols:
+                if pol not in data.pols:
+                    raise ValueError(f"Coupling polarization string {pol} not in data polarizations: {data.pols}.")
             
     @property
     def is_inverted(self) -> bool:
@@ -235,56 +239,174 @@ class UVCoupling:
             inplace=inplace
         )
 
-    def write_coupling(self, filename: str, **kwargs) -> None:
+    def write_coupling(
+        self,
+        filename: str | Path, 
+        clobber: bool=False,
+        chunks: str=True,
+        data_compression: str=None,
+    ) -> None:
         """
-        TODO: Write the coupling parameters to an hdf5 file.
+        Function to write a coupling object out to a hdf5 file
 
-        What are the necessary key-value pairs to store?
-            - coupling: ndarray
-            - Antenna names: ndarray
-            - Antenna positions: dict
-            - Frequencies: ndarray
-            - Times: ndarray (if not time-invariant)
+        Parameters:
+        ----------
+        filename: str | Path
+            Path to the output file where the coupling parameters will be saved.
+        clobber: bool, optional
+            If True, overwrite the file if it exists. Default is False.
+        chunks: str, optional
+            Chunking strategy for the dataset. Default is True, which uses automatic chunking.
+        data_compression: str, optional
+            Compression algorithm to use for the dataset. Default is None, which means no compression.
+
+        Raises:
+        ------
+        FileExistsError
+            If the file already exists and clobber is False.
         """
-        raise NotImplementedError
+        filename = Path(filename)
+            
+        if filename.exists() and not clobber:
+            raise FileExistsError(f"File {filename} exists. Use clobber=True to overwrite.")
+        
+        with h5py.File(filename, 'w') as f:
+            # Create header for attribute info
+            header = f.create_group("Header")
+            
+            # Write out version information
+            header["version"] = np.bytes_(version)
+            
+            # Write out coordinate arrays
+            header["freqs"] = self.freqs
+            if self.times is not None:
+                header["times"] = self.times
+            else:
+                header["times"] = h5py.Empty("f")
+
+            # Extract antenna numbers (keys) and positions (values)
+            ant_nums = list(self.antpos.keys())
+            ant_positions = list(self.antpos.values())
+            header["antenna_numbers"] = np.array(ant_nums, dtype=int)
+            header["antenna_positions"] = np.array(ant_positions)
+
+            # Store polarizations
+            pols_encoded = [p.encode('utf-8') for p in self.pols]
+            header["polarization_array"] = pols_encoded
+            
+            # Create data group for main arrays
+            data_group = f.create_group("Data")
+            data_group.create_dataset(
+                'coupling',
+                data=self.coupling,
+                compression=data_compression,
+                chunks=chunks
+            )
+
+        # Write out metadata as a group (similar to extra_keywords in pyuvdata)
+        if self.metadata:
+            metadata_group = header.create_group("metadata")
+            for key, value in self.metadata.items():
+                if isinstance(value, str):
+                    metadata_group[key] = np.bytes_(value)
+                elif value is None:
+                    # Save as empty/null dataset
+                    metadata_group[key] = h5py.Empty("f")
+                else:
+                    metadata_group[key] = value
 
     @classmethod
-    def read_coupling(cls, filename: str, **kwargs) -> "UVCoupling":
+    def read_coupling(cls, filename: Union[str, Path]) -> 'UVCoupling':
         """
-        Read coupling parameters from a file and return a UVCoupling object.
-
+        Read a UVCoupling object from an HDF5 file.
+        
         Parameters
         ----------
-        filename : str
-            Path to the file containing coupling parameters.
-        **kwargs : dict
-            Additional keyword arguments to pass to the constructor.
-
+        filename : str or Path
+            Path to the HDF5 file to read
+            
         Returns
         -------
         UVCoupling
-            An instance of UVCoupling with the loaded parameters.
-
+            The UVCoupling object loaded from the file
+            
         Raises
         ------
         FileNotFoundError
-            If the specified file does not exist.
+            If the specified file does not exist
         ValueError
-            If the file does not contain valid coupling parameters.
+            If the file format is not recognized or corrupted
+            
+        Examples
+        --------
+        >>> uvc = read_coupling('coupling_data.h5')
+        >>> print(f"Loaded coupling with shape: {uvc.coupling.shape}")
         """
-        data = read_uvcoupling(filename)
-
-        uvcoupling = cls(
-            coupling=data['coupling'],
-            freqs=data['freqs'],
-            times=data.get('times', None),
-            pols=data.get('pols', None),
-            metadata=data.get('metadata', {}),
-            first_order=data.get('first_order', False), 
-            antpos=data['antpos'], 
-            **kwargs
+        filename = Path(filename)
+        
+        if not filename.exists():
+            raise FileNotFoundError(f"File {filename} does not exist")
+        
+        with h5py.File(filename, 'r') as f:
+            # Check file format
+            if 'Header' not in f or 'Data' not in f:
+                raise ValueError("File does not appear to be a valid UVCoupling HDF5 file")
+            
+            header = f['Header']
+            data_group = f['Data']
+            
+            # Check version compatibility
+            if 'version' in header:
+                version = header['version'][()].decode('utf-8')
+            
+            # Read coordinate arrays
+            freqs = header['freqs'][()]
+            
+            # Handle times (could be empty)
+            times_data = header['times'][()]
+            if isinstance(times_data, h5py.Empty):
+                times = None
+            else:
+                times = times_data
+            
+            # Read antenna information
+            antenna_numbers = header['antenna_numbers'][()]
+            antenna_positions = header['antenna_positions'][()]
+            
+            # Reconstruct antpos dictionary
+            antpos = dict(zip(antenna_numbers, antenna_positions))
+            
+            # Read polarizations
+            pols_encoded = header['polarization_array'][()]
+            pols = [p.decode('utf-8') for p in pols_encoded]
+            
+            # Read main coupling data
+            coupling = data_group['coupling'][()]
+            
+            # Read metadata if it exists
+            metadata = {}
+            if 'metadata' in header:
+                metadata_group = header['metadata']
+                for key in metadata_group.keys():
+                    value = metadata_group[key]
+                    if isinstance(value, h5py.Empty):
+                        metadata[key] = None
+                    elif isinstance(value[()], bytes):
+                        metadata[key] = value[()].decode('utf-8')
+                    else:
+                        metadata[key] = value[()]
+                        
+        # Create and return UVCoupling object
+        uvc = cls(
+            coupling=coupling,
+            freqs=freqs,
+            times=times,
+            antpos=antpos,
+            pols=pols,
+            metadata=metadata
         )
-        raise uvcoupling
+        
+        return uvc
     
 def _extract_data_matrix(
     data: DataContainer, 
