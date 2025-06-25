@@ -22,7 +22,6 @@ class UVCoupling:
             freqs: np.ndarray,
             pols: List[str],
             times: Optional[np.ndarray] = None,
-            metadata: Optional[Dict] = None,
         ):
         """
         Initialize UVCoupling container.
@@ -39,14 +38,11 @@ class UVCoupling:
             Polarization strings (e.g., ['ee', 'nn']).
         times : np.ndarray, optional
             Time array in JD. Required if Ntimes > 1.
-        metadata : Dict, optional
-            Additional metadata dictionary.
         """
         self.coupling = coupling
         self.antpos = dict(antpos)
         self.freqs = freqs
         self.times = times  
-        self.metadata = metadata or {}
         self.pols = pols
 
         # Derived properties
@@ -94,8 +90,14 @@ class UVCoupling:
                 
             if self.times is not None and len(self.times) != self.ntimes:
                 raise ValueError(f"times length {len(self.times)} != ntimes {self.ntimes}")
+            
+            if self.times is None and self.ntimes > 1:
+                raise ValueError("times must be provided if ntimes > 1")
+        else:
+            # In production mode, skip validation
+            return
         
-    def _validate_data(self, data: DataContainer) -> None:
+    def _validate_data(self, data: DataContainer | np.ndarray) -> None:
         """
         Validate that the input data is compatible with the coupling parameters.
         
@@ -110,19 +112,36 @@ class UVCoupling:
             If the data does not match the expected shapes or dimensions.
         """
         if not self.production:
-            ## TODO: support UVData object, and plain ndarray of shape (Nbltimes, Nfreqs)
-            if len(data.ants) != self.nants:
-                raise ValueError(f"Data has {data.Nants} antennas, but coupling has {self.Nants} antennas.")
-            
-            if len(data.freqs) != self.coupling.shape[-1]:
-                raise ValueError(f"Data has {data.nfreqs} frequencies, but coupling has {self.coupling.shape[-1]} frequencies.")
-            
-            if not self.is_time_invariant and len(data.times) != self.coupling.shape[-2]:
-                raise ValueError(f"Data has {data.ntimes} times, but coupling has {self.coupling.shape[-2]} times.")
-            
-            for pol in self.pols:
-                if pol not in data.pols:
-                    raise ValueError(f"Coupling polarization string {pol} not in data polarizations: {data.pols}.")
+            if isinstance(data, DataContainer):
+                if len(data.ants) != self.nants:
+                    raise ValueError(f"Data has {len(data.antpos)} antennas, but coupling has {self.nants} antennas.")
+                
+                if len(data.freqs) != self.coupling.shape[-1]:
+                    raise ValueError(f"Data has {len(data.freqs)} frequencies, but coupling has {self.coupling.shape[-1]} frequencies.")
+                
+                if not self.is_time_invariant and len(data.times) != self.coupling.shape[-2]:
+                    raise ValueError(f"Data has {len(data.times)} times, but coupling has {self.coupling.shape[-2]} times.")
+                
+                for pol in self.pols:
+                    if pol not in data.pols:
+                        raise ValueError(f"Coupling polarization string {pol} not in data polarizations: {data.pols}.")
+            elif isinstance(data, np.ndarray):
+                # If data is a plain ndarray, check its shape
+                if data.ndim != self.coupling.ndim:
+                    raise ValueError(f"Data ndarray must have 5 dimensions, got {data.ndim}.")
+                
+                if data.shape[1] != self.nants or data.shape[2] != self.nants:
+                    raise ValueError(f"Data shape {data.shape} does not match expected shape for coupling {self.coupling.shape}.")
+                
+                if (not self.is_time_invariant and data.shape[3] != self.ntimes) or data.shape[4] != self.nfreqs:
+                    raise ValueError(f"Data shape {data.shape} does not match expected times and frequencies.")
+                
+                if data.shape[0] != len(self.pols):
+                    raise ValueError(f"Data shape {data.shape} does not match number of polarizations {len(self.pols)}.")
+            else:
+                raise TypeError("data must be a DataContainer or a numpy ndarray")
+        else:
+            return  # In production mode, skip validation
             
     @property
     def is_inverted(self) -> bool:
@@ -167,10 +186,10 @@ class UVCoupling:
             # If already inverted with the same parameters, return cached result
             return 
         
-        if self.is_inverted and first_order:
+        if first_order:
             # Inverse not needed for first-order coupling solver
             self._inverted = False            
-        elif not first_order:
+        else:
             # Initialize the inverse coupling matrix
             self.inverse_coupling = np.zeros_like(self.coupling, dtype=self.dtype)
 
@@ -303,18 +322,6 @@ class UVCoupling:
                 chunks=chunks
             )
 
-        # Write out metadata as a group (similar to extra_keywords in pyuvdata)
-        if self.metadata:
-            metadata_group = header.create_group("metadata")
-            for key, value in self.metadata.items():
-                if isinstance(value, str):
-                    metadata_group[key] = np.bytes_(value)
-                elif value is None:
-                    # Save as empty/null dataset
-                    metadata_group[key] = h5py.Empty("f")
-                else:
-                    metadata_group[key] = value
-
     @classmethod
     def read_coupling(cls, filename: Union[str, Path]) -> 'UVCoupling':
         """
@@ -349,16 +356,12 @@ class UVCoupling:
         
         with h5py.File(filename, 'r') as f:
             # Check file format
-            if 'Header' not in f or 'Data' not in f:
-                raise ValueError("File does not appear to be a valid UVCoupling HDF5 file")
-            
             header = f['Header']
             data_group = f['Data']
             
             # Check version compatibility
-            if 'version' in header:
-                version = header['version'][()].decode('utf-8')
-            
+            version = header['version'][()].decode('utf-8')
+        
             # Read coordinate arrays
             freqs = header['freqs'][()]
             
@@ -382,20 +385,7 @@ class UVCoupling:
             
             # Read main coupling data
             coupling = data_group['coupling'][()]
-            
-            # Read metadata if it exists
-            metadata = {}
-            if 'metadata' in header:
-                metadata_group = header['metadata']
-                for key in metadata_group.keys():
-                    value = metadata_group[key]
-                    if isinstance(value, h5py.Empty):
-                        metadata[key] = None
-                    elif isinstance(value[()], bytes):
-                        metadata[key] = value[()].decode('utf-8')
-                    else:
-                        metadata[key] = value[()]
-                        
+
         # Create and return UVCoupling object
         uvc = cls(
             coupling=coupling,
@@ -403,7 +393,6 @@ class UVCoupling:
             times=times,
             antpos=antpos,
             pols=pols,
-            metadata=metadata
         )
         
         return uvc
@@ -519,9 +508,19 @@ def _apply_coupling_forward(
     """
     # Build an identity matrix for the number of antennas
     identity = uvcoupling.identity_matrix
+
+    if isinstance(data, DataContainer):
+        ntimes = len(data.times)
+        nfreqs = len(data.freqs)
+    elif isinstance(data, np.ndarray):
+        # If data is a plain ndarray, assume it has shape (Npols, Nants, Nants, Ntimes, Nfreqs)
+        ntimes = data.shape[3]
+        nfreqs = data.shape[4]
+    else:
+        raise TypeError("data must be a DataContainer or a numpy ndarray")
     
     for pi, pol in enumerate(uvcoupling.pols):
-        for ti, time in enumerate(data.times):
+        for ti in range(ntimes):
             if isinstance(data, DataContainer):
                 vis_matrix = _extract_data_matrix(
                     data=data, 
@@ -529,12 +528,13 @@ def _apply_coupling_forward(
                     time_idx=ti, 
                     pol=pol
                 )
-            elif isinstance(data, np.ndarray):
+            else:
                 # If data is a plain ndarray, assume it has shape (Npols, Nants, Nants, Ntimes, Nfreqs)
-                vis_matrix = data[pi, :, :, ti, :]
-
+                vis_matrix = np.transpose(
+                    data[pi, :, :, ti, :], (2, 0, 1)
+                )
             coupled_vis = np.zeros_like(vis_matrix)
-            for fi, freq in enumerate(data.freqs):
+            for fi in range(nfreqs):
                 # Extract the visibility matrix for the current time, frequency, and polarization
                 if uvcoupling.is_time_invariant:
                     # If time-invariant, use the first frequency index
@@ -575,9 +575,11 @@ def _apply_coupling_forward(
                     time_idx=ti,
                     pol=pol
                 )
-            elif isinstance(data, np.ndarray):
+            else:
                 # If data is a plain ndarray, modify it in place
-                data[pi, :, :, ti, :] = coupled_vis
+                data[pi, :, :, ti, :] = np.transpose(
+                    coupled_vis, (1, 2, 0)
+                )
 
 def _apply_coupling_inverse(
     data: DataContainer | np.ndarray,
@@ -608,9 +610,19 @@ def _apply_coupling_inverse(
     # Build an identity matrix for the number of antennas
     identity = uvcoupling.identity_matrix
 
+    if isinstance(data, DataContainer):
+        # If data is a DataContainer, get the number of times and frequencies
+        ntimes = len(data.times)
+        nfreqs = len(data.freqs)
+    elif isinstance(data, np.ndarray):
+        # If data is a plain ndarray, assume it has shape (Npols, Nants, Nants, Ntimes, Nfreqs)
+        ntimes = data.shape[3]
+        nfreqs = data.shape[4]
+    else:
+        raise TypeError("data must be a DataContainer or a numpy ndarray")
     
     for pi, pol in enumerate(uvcoupling.pols):
-        for ti, time in enumerate(data.times):
+        for ti in range(ntimes):
             if isinstance(data, DataContainer):
                 # Extract the visibility matrix for the current time and polarization
                 vis_matrix = _extract_data_matrix(
@@ -619,12 +631,14 @@ def _apply_coupling_inverse(
                     time_idx=ti, 
                     pol=pol
                 )
-            elif isinstance(data, np.ndarray):
+            else:
                 # If data is a plain ndarray, assume it has shape (Npols, Nants, Nants, Ntimes, Nfreqs)
-                vis_matrix = data[pi, :, :, ti, :]
+                vis_matrix = np.transpose(
+                    data[pi, :, :, ti, :], (2, 0, 1)
+                )
 
             uncoupled_vis = np.zeros_like(vis_matrix)
-            for fi, freq in enumerate(data.freqs):
+            for fi in range(nfreqs):
                 # Apply the coupling parameters
                 if first_order:
                     if uvcoupling.is_time_invariant:
@@ -663,9 +677,11 @@ def _apply_coupling_inverse(
                     time_idx=ti,  
                     pol=pol
                 )
-            elif isinstance(data, np.ndarray):
+            else:
                 # If data is a plain ndarray, modify it in place
-                data[pi, :, :, ti, :] = uncoupled_vis
+                data[pi, :, :, ti, :] = np.transpose(
+                    uncoupled_vis, (1, 2, 0)
+                )
 
 def apply_coupling(
     data: DataContainer | np.ndarray,
