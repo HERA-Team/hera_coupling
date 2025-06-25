@@ -3,12 +3,24 @@ from typing import Tuple, Union, List
 
 # Jax libraries
 import jax
+import tqdm
 import jaxopt
 import optax
 from jax import numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from hera_cal.datacontainer import DataContainer
+
+"""
+Outstanding Issues:
+1. The `project_baselines_to_grid` function needs to be integrated with the coupling grid
+   to ensure that the antenna positions are correctly projected onto the grid.
+2. The `CouplingGrid` class needs to be fully implemented to handle the coupling parameters
+   and provide methods for selecting and setting coupling values.
+3. Need to decide if the 
+
+"""
+
 
 class CouplingGrid:
     def __init__(self, antpos, include_autos: bool = False):
@@ -141,8 +153,8 @@ def build_coupling_grid(antpos, uvw_grid, ratio: int = 1):
         The UVW coordinates of the grid.
     ratio : int
         The ratio of the antenna positions to be projected.
+    
     Returns
-    -------
     -------
     tuple
         The coupling grid for the antenna positions.
@@ -199,9 +211,11 @@ def deconvolve_visibilities(coupling, data_fft):
 def deconv_loss_function(
     parameters: dict,
     data_fft: jnp.ndarray,
-    mask: jnp.ndarray,
+    noise: jnp.ndarray,
+    idx: jnp.ndarray,
     window: jnp.ndarray,
-    lamb: float = 1e-3
+    lamb: float = 1e-3,
+    lambda_reg: float = 1e-3,
 ) -> jnp.ndarray:
     """
     Compute the loss function for deconvolution.
@@ -224,27 +238,35 @@ def deconv_loss_function(
         jnp.ndarray
             Computed loss value.
     """
-    model = deconvolve_visibilities(parameters, data_fft)
+    coupling = jnp.zeros((1,) + data_fft.shape[1:], dtype=complex)
+    #coupling = coupling.at[:, :, 0, 0].add(1.0)
+    coupling = coupling.at[:, :, idx[:, 0], idx[:, 1]].add(parameters['coupling'])
     
-    # Apply mask and window to the model and grid data
-    masked_model = model * mask * window
-        
-    # Add regularization term
-    reg_loss = lamb * jnp.sum(jnp.abs(parameters["coupling"]))
-    
-    return reg_loss + _scaled_log_1p_normalized(masked_model).sum()
+    # Deconvolve coupling data using FFT
+    data_deconv = deconvolve_visibilities(
+        coupling, data_fft=data_fft
+    )
+    diff = parameters['coupling'][..., 0]
+    other_amp = jnp.sum(jnp.abs(parameters['coupling'][..., 1:]) ** 2)
+    diff_fft = jnp.fft.fft2(data_deconv[:, :, idx[:, 0], idx[:, 1]] * window, axes=(0, 1), norm='ortho') # just minimize deconvolved data
+    windowing_term = jnp.mean(_scaled_log_1p_normalized(jnp.abs(diff_fft) / noise))
+    return lamb * jnp.mean(jnp.square(jnp.abs(diff - 1))) + (1 - lamb) * windowing_term + other_amp * lambda_reg
 
 
 def fit_coupling_redundantly_averaged(
     parameters: dict, 
     grid_data: jnp.ndarray, 
-    mask: jnp.ndarray, 
+    noise: jnp.ndarray, 
+    idx: jnp.ndarray, 
     window: jnp.ndarray, 
     lamb: float = 1e-3, 
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
     tol: float = 1e-6,
+    history_size: int = 10,
+    linesearch: str = "zoom",
+    lambda_reg: float = 1e-3,
     verbose: bool = False
 ) -> Tuple[dict, Union[dict, List[float]]]:
     """
@@ -290,16 +312,19 @@ def fit_coupling_redundantly_averaged(
             fun=deconv_loss_function, 
             tol=tol, 
             maxiter=maxiter,
-            verbose=verbose
+            verbose=verbose,
+            history_size=history_size,
+            linesearch=linesearch,
         )
 
         solved_params, meta = solver.run(
-            parameters, 
-            data=grid_data, 
+            parameters,  
             data_fft=data_fft, 
-            mask=mask, 
+            noise=noise,
+            idx=idx, 
             window=window, 
-            lamb=lamb
+            lamb=lamb,
+            lambda_reg=lambda_reg,
         )
 
         return solved_params, meta
@@ -315,12 +340,13 @@ def fit_coupling_redundantly_averaged(
         for nit in tqdm.tqdm(range(maxiter), desc="Optimization Progress"):
             # Compute loss and gradients
             loss_value, grads = jax.value_and_grad(deconv_loss_function)(
-                parameters, 
-                grid_data, 
-                data_fft, 
-                mask, 
-                window,  
-                lamb
+                parameters,  
+                data_fft=data_fft, 
+                noise=noise,
+                idx=idx, 
+                window=window, 
+                lamb=lamb,
+                lambda_reg=lambda_reg,
             )
             
             # Update parameters
@@ -389,7 +415,7 @@ class CouplingDeconvolution:
             The fitted coupling parameters.
         """
         # Extract the relevant data from the data container
-
+        # TODO: Get data using the gridding code
 
         # Extract the relevant data from the coupling grid
         coupling_values, index = self.coupling_grid.select_coupling(
@@ -417,6 +443,10 @@ class CouplingDeconvolution:
             freq_slice: slice
         ):
         """
+        TODO: now have UVCoupling class that handles deconvolution.
+              Should I make a RedUVCoupling class that inherits from UVCoupling
+              and uses FFTs instead of matrix multiplication?
+
         Deconvolve the visibilities using the fitted coupling parameters.
         
         Parameters:
