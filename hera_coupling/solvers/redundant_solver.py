@@ -9,8 +9,8 @@ import optax
 from jax import numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
+from hera_filters import dspec
 from hera_cal.datacontainer import DataContainer
-
 """
 Outstanding Issues:
 1. The `project_baselines_to_grid` function needs to be integrated with the coupling grid
@@ -170,7 +170,6 @@ def build_coupling_grid(antpos, uvw_grid, ratio: int = 1):
 
     return coupling_grid
 
-
 @jax.jit
 def _scaled_log_1p_normalized(data):
     """
@@ -191,7 +190,7 @@ def _scaled_log_1p_normalized(data):
     return jnp.log1p(jnp.maximum(data - 1, 0))
 
 @jax.jit
-def deconvolve_visibilities(coupling, data_fft):
+def deconvolve_visibilities(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp.ndarray:
     """
     Deconvolve visibilities using the provided parameters and FFT of the data.
 
@@ -202,7 +201,7 @@ def deconvolve_visibilities(coupling, data_fft):
             2D-FFT of the gridded data along the grid axes. 
 
     Returns:
-        array-like: Deconvolved visibilities
+        jnp.ndarray: Deconvolved visibilities
     """
     model = jnp.fft.ifft2(data_fft / jnp.fft.fft2(coupling))
     return model
@@ -214,7 +213,7 @@ def deconv_loss_function(
     noise: jnp.ndarray,
     idx: jnp.ndarray,
     window: jnp.ndarray,
-    lamb: float = 1e-3,
+    alpha: float = 1e-3,
     lambda_reg: float = 1e-3,
 ) -> jnp.ndarray:
     """
@@ -230,27 +229,64 @@ def deconv_loss_function(
             Mask applied during optimization.
         window : jnp.ndarray
             Window function applied to the data.
-        lamb : float, optional
+        alpha : float, optional
             Regularization parameter (default: 1e-3).
+        lambda_reg : float, optional
+            Regularization parameter for parameter sparsity (default: 1e-3).
 
     Returns:
     --------
         jnp.ndarray
             Computed loss value.
     """
+    # Extract coupling parameters
+    coupling_params = parameters['coupling']
+
+    # Initialize coupling array with zeros and add the coupling parameters
     coupling = jnp.zeros((1,) + data_fft.shape[1:], dtype=complex)
-    #coupling = coupling.at[:, :, 0, 0].add(1.0)
-    coupling = coupling.at[:, :, idx[:, 0], idx[:, 1]].add(parameters['coupling'])
+    coupling = coupling.at[:, :, idx[:, 0], idx[:, 1]].add(coupling_params)
     
     # Deconvolve coupling data using FFT
     data_deconv = deconvolve_visibilities(
-        coupling, data_fft=data_fft
+        coupling=coupling, 
+        data_fft=data_fft
     )
-    diff = parameters['coupling'][..., 0]
-    other_amp = jnp.sum(jnp.abs(parameters['coupling'][..., 1:]) ** 2)
-    diff_fft = jnp.fft.fft2(data_deconv[:, :, idx[:, 0], idx[:, 1]] * window, axes=(0, 1), norm='ortho') # just minimize deconvolved data
-    windowing_term = jnp.mean(_scaled_log_1p_normalized(jnp.abs(diff_fft) / noise))
-    return lamb * jnp.mean(jnp.square(jnp.abs(diff - 1))) + (1 - lamb) * windowing_term + other_amp * lambda_reg
+
+    # Extract deconvolved data for the specified indices, applying the window function, and compute the FFT
+    data_deconv_fft = jnp.fft.fft2(
+        data_deconv[:, :, idx[:, 0], idx[:, 1]] * window, 
+        axes=(0, 1), 
+        norm='ortho'
+    )
+    
+    # Extract coupling parameters and compute the loss
+    primary_coupling_params = coupling_params[..., 0]
+    regularization_term = jnp.mean(
+        jnp.square(
+            jnp.abs(primary_coupling_params - 1.0)
+            )
+    )
+
+    # Minimize the size of the coupling parameters
+    param_sparsity_term = jnp.sum(
+        jnp.abs(coupling_params[..., 1:]) ** 2
+    )
+
+    # Compute the delay fringe sparsity
+    delay_fringe_sparsity = jnp.mean(
+        _scaled_log_1p_normalized(
+            jnp.abs(data_deconv_fft) / noise
+        )
+    )
+    
+    # Combine the loss components
+    total_loss = (
+        delay_fringe_sparsity +
+        alpha * regularization_term +
+        lambda_reg * param_sparsity_term
+    )
+    
+    return total_loss
 
 
 def fit_coupling_redundantly_averaged(
@@ -259,7 +295,7 @@ def fit_coupling_redundantly_averaged(
     noise: jnp.ndarray, 
     idx: jnp.ndarray, 
     window: jnp.ndarray, 
-    lamb: float = 1e-3, 
+    alpha: float = 1e-3, 
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
@@ -323,7 +359,7 @@ def fit_coupling_redundantly_averaged(
             noise=noise,
             idx=idx, 
             window=window, 
-            lamb=lamb,
+            alpha=alpha,
             lambda_reg=lambda_reg,
         )
 
@@ -345,7 +381,7 @@ def fit_coupling_redundantly_averaged(
                 noise=noise,
                 idx=idx, 
                 window=window, 
-                lamb=lamb,
+                alpha=alpha,
                 lambda_reg=lambda_reg,
             )
             
@@ -386,6 +422,52 @@ class CouplingDeconvolution:
         """
         self.coupling_grid = coupling_grid
 
+    def estimate_noise_scale(
+            self, 
+            data: DataContainer, 
+            time_slice: slice, 
+            freq_slice: slice, 
+            window_function: str = "tukey", 
+        ):
+        """
+        Estimate the noise scale for the coupling deconvolution. Used to set the
+        noise scale for the coupling deconvolution.
+
+        Parameters:
+        -----------
+            data : DataContainer
+                The data container containing the visibilities to be deconvolved.
+                Autocorrelations must be included in the data container.
+            time_slice : slice
+                Time slice for the data.
+            freq_slice : slice
+                Frequency slice for the data.
+            window_function : str, optional
+                The window function to apply (default: "tukey").
+
+        Returns:
+        --------
+            noise_scale : jnp.ndarray
+                The estimated noise scale for the coupling deconvolution.
+        """
+        # Get the window function for the frequency and time slices
+        freq_window = dspec.get_window(
+            window_function,
+            data.freqs[freq_slice].size,
+        )
+        time_window = dspec.get_window(
+            window_function,
+            data.times[time_slice].size,
+        )
+        window = jnp.outer(time_window, freq_window)
+        
+        # Calculate the equivalent noise bandwidth for the window function
+        enbw = ...
+        
+        # Extract the relevant data from the data container
+        for key in data:
+            pass
+
     def fit_coupling_parameters(
             self, 
             data: DataContainer,
@@ -396,10 +478,12 @@ class CouplingDeconvolution:
             maxiter: int=100
         ) -> dict:
         """
-        Deconvolve the visibilities using the provided parameters.
+        Fit for time-independent coupling parameters using FFTs of the gridded data.
 
         Parameters:
         -----------
+        data : DataContainer
+            The data container containing the visibilities to be deconvolved.
         time_slice : slice
             Time slice for the data.
         freq_slice : slice
@@ -433,6 +517,11 @@ class CouplingDeconvolution:
             maxiter=maxiter,
             use_LBFGS=use_LBFGS,
         )
+
+        # TODO: Store fit parameters in a more structured way
+        #       ideally something like UVCoupling class, maybe
+        #       RedUVCoupling class that inherits from UVCoupling
+        #       and uses FFTs instead of matrix multiplication.
 
         return fit_parameters
     
