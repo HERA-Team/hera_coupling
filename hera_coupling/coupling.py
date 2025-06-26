@@ -442,7 +442,7 @@ def _extract_data_matrix(
             vis_matrix[..., i, j] = data[blpol][time_idx]
 
             if i != j:  # Add conjugate for off-diagonal
-                vis_matrix[..., j, i] = np.conj(data[blpol][time_idx])
+                vis_matrix[..., j, i] = np.conj(vis_matrix[..., i, j])
                 
     return vis_matrix
 
