@@ -1,5 +1,6 @@
 import numpy as np
-from typing import Tuple, Union, List
+import copy
+from typing import Tuple, Union, List, Dict
 
 # Jax libraries
 import jax
@@ -10,6 +11,8 @@ from jax import numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from hera_filters import dspec
+from hera_cal import utils
+from hera_cal.redcal import get_pos_reds
 from hera_cal.datacontainer import DataContainer
 """
 Outstanding Issues:
@@ -23,33 +26,67 @@ Outstanding Issues:
 
 
 class CouplingGrid:
-    def __init__(self, antpos, include_autos: bool = False):
+    def __init__(self, active_antpos, include_autos: bool = False):
         """
+        Class that handles the coupling grid for antenna positions.
+
         Parameters:
         -----------
-            antpos : dictionary
+            active_antpos : dictionary
                 Antenna positions of the active antennas in the array
             include_autos : bool, default=False
                 Flag on whether to include auto correlations in visibility grid
         """
-        self.antpos = antpos
-        
-        # Initialize the coupling grid
-        self.prepare_coordinates(
+        self.active_antpos = active_antpos
+        self.all_reds = get_pos_reds(            
+            active_antpos, 
             include_autos=include_autos
         )
-        
-    def prepare_coordinates(self, include_autos: bool = False):
+
+        # Extract a representative list of antenna pairs for each redundant group
+        self.antpairs = [red[0] for red in self.all_reds]
+ 
+        self.prepare_coordinates(
+            antpairs=self.antpairs, 
+            antpos=self.active_antpos,
+            tol=tol
+        )
+
+    def prepare_coordinates(self, antpairs, antpos, tol: float=1e-2):
         """
-        Setup
+        Prepare the coordinates for the coupling grid based on the antenna pairs and positions.
 
         Parameters:
         -----------
-        include_autos : bool, default=False
-            Flag on whether to include auto correlations in visibility grid.
+            antpairs : list of tuple of int
+                List of antenna index pairs [(i1, j1), (i2, j2), ...] to project.
+            antpos : array_like
+                Array of antenna positions with shape (N_antennas, 3).
+
+        Returns:
+        --------
+            np.ndarray
+                An array of shape (len(antpairs), 2) with [east, north] projections 
+                for each baseline.
         """
-        project_baselines_to_grid()
-        self.coupling = {}
+        coordinates = project_coordinates_to_grid(antpairs, antpos)
+
+        # Round the coordinates to the nearest integer and convert to int
+        gridded_coords = np.round(coordinates, decimals=0).astype(int)
+
+        assert np.less_equal(np.abs(coordinates - gridded_coords), tol).all(), \
+            "Coordinates not within tolerance of integer grid."
+        
+        # Create a mapping from antenna pairs to their gridded coordinates
+        self.bl_to_grid_coords = {
+            antpair: coord
+            for antpair, coord in zip(antpairs, gridded_coords)
+        }
+
+        # Create a mapping from gridded coordinates to antenna pairs
+        grid_coord_to_bl = {
+            coord: bl for bl, coord in self.bl_to_grid_coord.items()
+        }
         
     def select_coupling(
         self, 
@@ -93,13 +130,7 @@ class CouplingGrid:
         # This is a placeholder for the actual selection logic
         pass
 
-    def set_coupling(self, antpairs, coupling_values):
-        """
-        Overwrite the coupling values stored in coupling array
-        """
-        pass
-
-def project_baselines_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
+def project_coordinates_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
     """
     Projects baseline vectors between antenna pairs onto a 2D coordinate system 
     defined by approximate east-west and north-south directions.
@@ -141,16 +172,14 @@ def project_baselines_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11),
 
     return np.array(projections)
 
-def build_coupling_grid(antpos, uvw_grid, ratio: int = 1):
+def build_coupling_grid(coupling_grid: CouplingGrid):
     """
     Builds the coupling grid for the antenna positions.
 
     Parameters
     ----------
-    antpos : array_like
-        The antenna positions to be projected.
-    uvw_grid : array_like
-        The UVW coordinates of the grid.
+    coupling_grid : CouplingGrid
+        The coupling grid object containing the antenna positions and coupling parameters.
     ratio : int
         The ratio of the antenna positions to be projected.
     
@@ -159,16 +188,7 @@ def build_coupling_grid(antpos, uvw_grid, ratio: int = 1):
     tuple
         The coupling grid for the antenna positions.
     """
-    # Get the antenna pairs
-    antpair = np.array([antpos[i] for i in range(len(antpos))])
-    # Project the antenna positions onto a grid defined by the ratio
-    uvw_grid = project_baselines_to_grid(antpair, antpos, ratio)
-    # Build the coupling grid
-    coupling_grid = np.zeros((len(antpair), len(uvw_grid)))
-    for i in range(len(antpair)):
-        coupling_grid[i] = uvw_grid[i]
-
-    return coupling_grid
+    raise NotImplementedError("build_coupling_grid function is not implemented yet.")
 
 @jax.jit
 def _scaled_log_1p_normalized(data):
@@ -203,8 +223,10 @@ def deconvolve_visibilities(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp
     Returns:
         jnp.ndarray: Deconvolved visibilities
     """
-    model = jnp.fft.ifft2(data_fft / jnp.fft.fft2(coupling))
-    return model
+    preturbed_beam = jnp.fft.fft2(coupling)
+    div = data_fft * (1 / preturbed_beam)
+    deconvolved = jnp.fft.ifft2(div, norm='ortho')
+    return deconvolved
 
 @jax.jit
 def deconv_loss_function(
@@ -225,8 +247,6 @@ def deconv_loss_function(
             Parameters for the deconvolution. 
         data_fft : jnp.ndarray
             FFT of the input data.
-        mask : jnp.ndarray
-            Mask applied during optimization.
         window : jnp.ndarray
             Window function applied to the data.
         alpha : float, optional
@@ -290,7 +310,7 @@ def deconv_loss_function(
 
 
 def fit_coupling_redundantly_averaged(
-    parameters: dict, 
+    coupling_parameters: jnp.ndarray, 
     grid_data: jnp.ndarray, 
     noise: jnp.ndarray, 
     idx: jnp.ndarray, 
@@ -314,12 +334,10 @@ def fit_coupling_redundantly_averaged(
 
     Parameters:
     -----------
-        parameters : dict
-            Initial parameters to be optimized
+        coupling_parameters : jnp.ndarray
+            Initial parameters to be optimized. Should have shape (nparams, nfreqs)
         grid_data : jnp.ndarray
             Input grid data for optimization
-        mask : jnp.ndarray
-            Mask applied during optimization
         window : jnp.ndarray
             Window function applied to the data
         lamb : float, optional
@@ -338,6 +356,11 @@ def fit_coupling_redundantly_averaged(
         Tuple[dict, Union[dict, List[float]]]
             Optimized parameters and metadata/loss history
     """
+    # TODO: Should do some validation checks of the inputs here
+    parameters = {
+        'coupling': coupling_parameters
+    }
+
     # Compute FFT of input data
     data_fft = jnp.fft.fft2(grid_data)
     
@@ -353,7 +376,7 @@ def fit_coupling_redundantly_averaged(
             linesearch=linesearch,
         )
 
-        solved_params, meta = solver.run(
+        solved_parameters, meta = solver.run(
             parameters,  
             data_fft=data_fft, 
             noise=noise,
@@ -363,7 +386,7 @@ def fit_coupling_redundantly_averaged(
             lambda_reg=lambda_reg,
         )
 
-        return solved_params, meta
+        return solved_parameters, meta
 
     else:
         # Custom optimizer gradient descent
@@ -400,7 +423,176 @@ def fit_coupling_redundantly_averaged(
         
         return parameters, loss_history
     
-class CouplingDeconvolution:
+def fit_coupling_parameters(
+    coupling_grid: CouplingGrid,
+    data: DataContainer,
+    nsamples: DataContainer,
+    time_slice: slice,
+    freq_slice: slice, 
+    window_function: str="tukey", 
+    use_LBFGS: bool=True,
+    maxiter: int=100,
+    history_size: int=10,
+    linesearch: str="zoom",
+    tol: float=1e-6,
+    alpha: float=1e-3,
+    lambda_reg: float=1e-3,
+    verbose: bool=False,
+    **kwargs: dict
+) -> dict:
+    """
+    Fit for time-independent coupling parameters using FFTs of the gridded data.
+
+    Parameters:
+    -----------
+    data : DataContainer
+        The data container containing the visibilities to be deconvolved.
+    time_slice : slice
+        Time slice for the data.
+    freq_slice : slice
+        Frequency slice for the data.
+    window_function : str, optional
+        The window function to apply (default: "tukey").
+    use_LBFGS : bool, optional
+        Whether to use L-BFGS optimizer (default: True).
+    
+    Returns:
+    --------
+    fit_parameters : dict
+        The fitted coupling parameters.
+    """
+    # Get the window function for the frequency and time slices
+    freq_window = dspec.get_window(
+        window_function,
+        data.freqs[freq_slice].size,
+    )
+    time_window = dspec.get_window(
+        window_function,
+        data.times[time_slice].size,
+    )
+    window = jnp.outer(time_window, freq_window)
+
+    # Estimate the noise variance for the coupling deconvolution
+    noise_variance = estimate_windowed_noise_variance(
+        data=data,
+        nsamples=nsamples,
+        time_slice=time_slice,
+        freq_slice=freq_slice,
+        window_function=window_function,
+    )
+
+    # Extract the relevant data from the coupling grid
+    coupling_values, index = coupling_grid.select_coupling(
+        **kwargs  # Placeholder for actual selection parameters
+    )
+
+    # Get data for the specified time and frequency slices
+    grid_data = coupling_grid.build_data_grid(
+        data=data,
+        noise=noise_variance,
+        time_slice=time_slice,
+        freq_slice=freq_slice,
+    )
+
+    # Fit the coupling parameters using the deconvolution method
+    # This function will use the FFT of the gridded data and the 
+    # coupling parameters to optimize the coupling parameters.
+    fit_parameters = fit_coupling_redundantly_averaged(
+        coupling_values,
+        grid_data=grid_data,
+        window=window,
+        idx=index,
+        noise=noise_variance,
+        maxiter=maxiter,
+        use_LBFGS=use_LBFGS,
+        history_size=history_size,
+        linesearch=linesearch,
+        tol=tol,
+        alpha=alpha,
+        lambda_reg=lambda_reg,
+        verbose=verbose,
+    )
+
+    # TODO: Store fit parameters in a more structured way
+    #       ideally something like UVCoupling class, maybe
+    #       RedUVCoupling class that inherits from UVCoupling
+    #       and uses FFTs instead of matrix multiplication.
+
+    return fit_parameters
+
+    
+def estimate_windowed_noise_variance(
+    data: DataContainer, 
+    nsamples: DataContainer,
+    time_slice: slice, 
+    freq_slice: slice, 
+    window_function: str = "tukey", 
+) -> Dict[Tuple[int, int, str], jnp.ndarray]:
+    """
+    Estimate the windowed noise variance for the coupling deconvolution. Used to set the
+    noise scale for the coupling deconvolution.
+
+    Parameters:
+    -----------
+        data : DataContainer
+            The data container containing the visibilities to be deconvolved.
+            Autocorrelations must be included in the data container.
+        nsamples : DataContainer
+            The number of samples for each visibility in the data container.
+        time_slice : slice
+            Time slice for the data.
+        freq_slice : slice
+            Frequency slice for the data.
+        window_function : str, optional
+            The window function to apply (default: "tukey").
+
+    Returns:
+    --------
+        noise_scale : jnp.ndarray
+            The estimated noise scale for the coupling deconvolution.
+    """
+    # Get the window function for the frequency and time slices
+    freq_window = dspec.get_window(
+        window_function,
+        data.freqs[freq_slice].size,
+    )
+    time_window = dspec.get_window(
+        window_function,
+        data.times[time_slice].size,
+    )
+    window = jnp.outer(time_window, freq_window)
+    
+    # Calculate the equivalent noise bandwidth for the window function
+    enbw = np.mean(window ** 2) / np.mean(window) ** 2
+    
+    # Dictionary to hold the noise variance for each baseline
+    noise_var = {}
+
+    # Extract the relevant data from the data container
+    for key in data:
+        ant1, ant2 = utils.split_bl(key)
+        ap1, ap2 = utils.split_pol(key[-1])
+
+        auto_ant1 = (ant1[0], ant1[0], utils.join_pol(ap1, ap1))
+        auto_ant2 = (ant2[0], ant2[0], utils.join_pol(ap2, ap2))
+
+        auto1, auto2 = (
+            data[auto_ant1][time_slice][:, freq_slice], 
+            data[auto_ant2][time_slice][:, freq_slice]
+        )
+
+        ns = nsamples[key]
+        dt = np.diff(data.times) * 3600 * 24  # Convert to seconds
+        df = np.diff(data.freqs)
+
+        # Calculate the noise scale for the autocorrelations
+        noise_var[key] = (
+            np.mean(np.abs(auto1) * np.abs(auto2), keepdims=True) / (ns * dt * df)
+        ) * enbw
+
+    return noise_var
+    
+class RedUVCoupling:
     """
     Class for deconvolving visibilities using a coupling grid.
 
@@ -422,114 +614,14 @@ class CouplingDeconvolution:
         """
         self.coupling_grid = coupling_grid
 
-    def estimate_noise_scale(
-            self, 
-            data: DataContainer, 
-            time_slice: slice, 
-            freq_slice: slice, 
-            window_function: str = "tukey", 
-        ):
-        """
-        Estimate the noise scale for the coupling deconvolution. Used to set the
-        noise scale for the coupling deconvolution.
-
-        Parameters:
-        -----------
-            data : DataContainer
-                The data container containing the visibilities to be deconvolved.
-                Autocorrelations must be included in the data container.
-            time_slice : slice
-                Time slice for the data.
-            freq_slice : slice
-                Frequency slice for the data.
-            window_function : str, optional
-                The window function to apply (default: "tukey").
-
-        Returns:
-        --------
-            noise_scale : jnp.ndarray
-                The estimated noise scale for the coupling deconvolution.
-        """
-        # Get the window function for the frequency and time slices
-        freq_window = dspec.get_window(
-            window_function,
-            data.freqs[freq_slice].size,
-        )
-        time_window = dspec.get_window(
-            window_function,
-            data.times[time_slice].size,
-        )
-        window = jnp.outer(time_window, freq_window)
+        # TODO: Also need to store the coupling parameters
         
-        # Calculate the equivalent noise bandwidth for the window function
-        enbw = ...
-        
-        # Extract the relevant data from the data container
-        for key in data:
-            pass
-
-    def fit_coupling_parameters(
+    def apply(
             self, 
             data: DataContainer,
-            time_slice: slice,
-            freq_slice: slice, 
-            window_function: str="tukey", 
-            use_LBFGS: bool=True,
-            maxiter: int=100
-        ) -> dict:
-        """
-        Fit for time-independent coupling parameters using FFTs of the gridded data.
-
-        Parameters:
-        -----------
-        data : DataContainer
-            The data container containing the visibilities to be deconvolved.
-        time_slice : slice
-            Time slice for the data.
-        freq_slice : slice
-            Frequency slice for the data.
-        window_function : str, optional
-            The window function to apply (default: "tukey").
-        use_LBFGS : bool, optional
-            Whether to use L-BFGS optimizer (default: True).
-        
-        Returns:
-        --------
-        fit_parameters : dict
-            The fitted coupling parameters.
-        """
-        # Extract the relevant data from the data container
-        # TODO: Get data using the gridding code
-
-        # Extract the relevant data from the coupling grid
-        coupling_values, index = self.coupling_grid.select_coupling(
-            ubl_keys=None, 
-            max_bl_cut=None, 
-            max_ew_length=None, 
-            max_ns_length=None
-        )
-
-        fit_parameters = fit_coupling_redundantly_averaged(
-            coupling_values,
-            grid_data=None,  # Placeholder for actual grid data
-            mask=None,  # Placeholder for actual mask
-            window=None,  # Placeholder for actual window
-            maxiter=maxiter,
-            use_LBFGS=use_LBFGS,
-        )
-
-        # TODO: Store fit parameters in a more structured way
-        #       ideally something like UVCoupling class, maybe
-        #       RedUVCoupling class that inherits from UVCoupling
-        #       and uses FFTs instead of matrix multiplication.
-
-        return fit_parameters
-    
-    def deconvolve_visibilities(
-            self, 
-            data: DataContainer,
-            time_slice: slice, 
-            freq_slice: slice
+            first_order: bool=False,
+            multi_path: bool=False,
+            inplace: bool=False,
         ):
         """
         TODO: now have UVCoupling class that handles deconvolution.
@@ -550,5 +642,45 @@ class CouplingDeconvolution:
             deconvolved_visibilities : array-like
                 The deconvolved visibilities.
         """
+        if not inplace:
+            data = copy.deepcopy(data)
+
         # Placeholder for actual data extraction logic
-        pass
+        for pol, pi in enumerate(data.pols):
+            for ti, time in enumerate(data.times):
+                # Extract the visibility data for the current time and frequency
+                grid_data = self.coupling_grid.build_data_grid(
+                    data=data,
+                    time_slice=slice(ti, ti + 1),
+                    pol=pi,
+                )
+                coupling_params = self.coupling_grid.select_coupling(
+                    time_slice=slice(ti, ti + 1),
+                    pol=pi,
+                )
+                for fi, freq in enumerate(data.freqs):
+                    # TODO: Apply the coupling deconvolution logic here
+                    # This is a placeholder for the actual deconvolution logic
+                    # deconvolved_visibilities = self.coupling_grid.deconvolve(vis_data)
+                    
+                    # If inplace is True, modify the data in place
+                    if inplace:
+                        data[(time, freq, pi)] = deconvolved_visibilities
+                    else:
+                        return deconvolved_visibilities
+
+    def to_uvcoupling(self) -> "UVCoupling":
+        """
+        Convert the coupling grid to a UVCoupling object, where the coupling parameters
+        have been expanded to an antenna-by-antenna coupling matrix.
+
+        TODO: Implement the conversion logic to UVCoupling.
+        TODO: Once other PR is merged, this should use the UVCoupling class
+
+        Returns:
+        --------
+            UVCoupling : UVCoupling
+                The UVCoupling object containing the coupling parameters.
+        """
+        # Placeholder for actual conversion logic
+        raise NotImplementedError("Conversion to UVCoupling not implemented yet.")
