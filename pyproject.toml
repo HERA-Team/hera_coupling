@@ -27,10 +27,12 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dynamic=["version"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "scipy",
+    "h5py",
+    "hera-calibration",
 ]
 
 [project.optional-dependencies]
