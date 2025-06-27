@@ -199,6 +199,20 @@ class TestApplyCoupling:
 		assert np.allclose(loaded_uvm.freqs, self.uvm.freqs), "Frequencies should match"
 		assert loaded_uvm.pols == self.uvm.pols, "Polarizations should match"
 
+		uvm = deepcopy(self.uvm)
+
+		# Invert so that we can also write the inverse coupling
+		uvm.invert(first_order=False, multi_path=False)
+
+		# Write the coupling with the inverse
+		uvm.write_coupling(file_path, clobber=True)
+		loaded_uvm = UVMutualCoupling.read_coupling(file_path)
+
+		# Check if the loaded uvm has the inverse coupling
+		assert loaded_uvm.is_inverted, "Loaded uvm should be inverted"
+		assert np.allclose(loaded_uvm.inverse_coupling, uvm.inverse_coupling), "Inverse coupling matrices should match"
+
+
 	def test_validate_data_ok(self):
 		# no exceptions on the good cases
 		self.uvm._validate_data(self.data)
