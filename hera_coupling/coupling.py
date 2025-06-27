@@ -743,7 +743,11 @@ def apply_coupling(
     return data
 
 
-def coupling_inflate(coupling, coupling_vecs, antpos, redtol=1.0):
+def coupling_inflate(
+    coupling: np.ndarray,
+    coupling_vecs: np.ndarray,
+    antpos: Dict[int, np.ndarray],
+    redtol: Optional[float] = 1.0):
     """
     Take a redundantly-compressed coupling parameter vector
     and inflate it to an Nants x Nants coupling matrix,
@@ -758,7 +762,7 @@ def coupling_inflate(coupling, coupling_vecs, antpos, redtol=1.0):
         shape (Nterms, 3) in ENU [meters]
     antpos : dict
         Antenna position dictionary
-    redtol : float
+    redtol : float, optional
         Redundancy tolerance [meters]
 
     Returns
@@ -775,7 +779,12 @@ class CouplingInflate:
     with antenna ordering set by antpos. Use this over
     the coupling_inflate() function for repeated calls.
     """
-    def __init__(self, coupling_vecs, antpos, redtol=1.0):
+    def __init__(
+        self,
+        coupling_vecs: np.ndarray,
+        antpos: Dict[int, np.ndarray],
+        redtol: Optional[float] = 1.0
+        ):
         """
         Parameters
         ----------
@@ -784,7 +793,7 @@ class CouplingInflate:
             shape (Nterms, 3) in ENU [meters]
         antpos : dict
             Antenna position dictionary
-        redtol : float
+        redtol : float, optional
             Redundancy tolerance [meters]
         """
         self.coupling_vecs = coupling_vecs
@@ -811,7 +820,10 @@ class CouplingInflate:
         self.idx = idx.ravel()
         self.zeros = zeros.ravel()
 
-    def __call__(self, coupling):
+    def __call__(
+        self,
+        coupling: np.ndarray,
+    ) -> np.ndarray:
         # coupling = (Npol, Nvec, Ntimes, Nfreqs)
         shape = coupling.shape[:1] + self.shape + coupling.shape[-2:]
 
@@ -827,19 +839,11 @@ class CouplingInflate:
         return coupling
 
 
-class RedCouplingAvg:
-    """
-    Take an Nants x Nants coupling matrix and compress
-    down to redundant coupling vectors.
-    """
-    def __init__(self):
-        raise NotImplementedError
-
-    def __call__(self, params):
-        pass
-
-
-def expand_coupling(coupling, ants, new_ants):
+def expand_coupling(
+    coupling: np.ndarray,
+    ants: List[int],
+    new_ants: List[int],
+) -> np.ndarray:
     """
     Expand coupling parameter to a new set of antennas.
 
