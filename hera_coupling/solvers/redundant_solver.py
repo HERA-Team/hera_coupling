@@ -218,6 +218,8 @@ def build_data_and_coupling_grids(
         data_antpairs=unflagged_baselines,
         coupling_antpairs=usable_baselines, # TODO: Not a great name for a parameter
         pol=pol,
+        time_slice=time_slice,
+        freq_slice=freq_slice,
     )
 
     return data_grid, noise_array, coupling_array, coupling_idx, window
@@ -277,12 +279,14 @@ def build_data_and_coupling_arrays(
     data_grid = np.zeros((ntimes, nfreqs) + 2 * (ngrid,), dtype=complex)
     coupling_array  = np.zeros((1, nfreqs, len(coupling_antpairs)), dtype=complex)
     noise_array = []
+    data_idx = np.zeros((len(data_antpairs), 2), dtype=int)
     
     for ci, (ai, aj) in enumerate(data_antpairs):
         if ai == aj:
             i, j = 0, 0  # Autos centered at the origin by default
         else:
             i, j = coupling_manager.bl_to_grid_coords[(ai, aj)]
+            data_idx[ci] = (i, j) # Only look at the crosses in optimization
 
         # Load data into grid
         data_grid[:, :, i, j] = data[(ai, aj, pol)][time_slice][:, freq_slice]
@@ -303,7 +307,7 @@ def build_data_and_coupling_arrays(
 
     # Transpose array to shape (1, 1, nbls)
     noise_array = np.transpose(noise_array, (1, 2, 0))
-    return data_grid, noise_array, coupling_array, coupling_idx
+    return data_grid, noise_array, data_idx, coupling_array, coupling_idx
 
 def filter_baselines(
     all_bls: List[Tuple[int, int]],
@@ -417,7 +421,7 @@ def project_coordinates_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11
 @jax.jit
 def _scaled_log_1p_normalized(data):
     """
-    Computes the scaled log(max(x - 1, 0)) function.
+    Computes the scaled log(x + 1) function.
 
     Parameters
     ----------
@@ -431,7 +435,7 @@ def _scaled_log_1p_normalized(data):
         jnp.array
             The scaled log(1 + x) values.
     """
-    return jnp.log1p(jnp.maximum(data - 1, 0))
+    return jnp.log1p(data)
 
 @jax.jit
 def deconvolve_visibilities(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp.ndarray:
@@ -459,9 +463,10 @@ def deconv_loss_function(
     parameters: dict,
     data_fft: jnp.ndarray,
     noise: jnp.ndarray,
-    idx: jnp.ndarray,
+    coupling_idx: jnp.ndarray,
+    data_idx: jnp.ndarray,
     window: jnp.ndarray,
-    lambda_reg: float = 1e-3,
+    lambda_reg: float = 0.0,
 ) -> jnp.ndarray:
     """
     Compute the loss function for deconvolution.
@@ -479,7 +484,7 @@ def deconv_loss_function(
         window : jnp.ndarray
             Window function applied to the data.
         lambda_reg : float, optional
-            Regularization parameter for parameter sparsity (default: 1e-3).
+            Regularization parameter for parameter sparsity (default: 0.0).
 
     Returns:
     --------
@@ -491,8 +496,11 @@ def deconv_loss_function(
 
     # Initialize coupling array with zeros and add the coupling parameters
     coupling = jnp.zeros((1,) + data_fft.shape[1:], dtype=complex)
-    coupling = coupling.at[:, :, idx[:, 0], idx[:, 1]].add(
+    coupling = coupling.at[:, :, coupling_idx[:, 0], coupling_idx[:, 1]].add(
         coupling_params
+    )
+    coupling = coupling.at[:, :, -coupling_idx[:, 0], -coupling_idx[:, 1]].add(
+        jnp.conj(coupling_params)
     )
     coupling = coupling.at[:, :, 0, 0].add(1)
     
@@ -504,20 +512,20 @@ def deconv_loss_function(
 
     # Extract deconvolved data for the specified indices, applying the window function, and compute the FFT
     data_deconv_fft = jnp.fft.fft2(
-        data_deconv[:, :, idx[:, 0], idx[:, 1]] * window, 
+        data_deconv[:, :, data_idx[:, 0], data_idx[:, 1]] * window, 
         axes=(0, 1), 
         norm='ortho'
     )
     
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
-        jnp.abs(coupling_params[..., 1:]) ** 2
+        jnp.abs(coupling_params) ** 2
     )
 
     # Compute the delay fringe sparsity
     delay_fringe_sparsity = jnp.mean(
         _scaled_log_1p_normalized(
-            jnp.abs(data_deconv_fft) / noise
+            jnp.abs(data_deconv_fft) ** 2 / noise ** 2
         )
     )
     
@@ -667,7 +675,7 @@ def fit_coupling_redundantly_averaged(
 
     # Compute FFT of input data
     # TODO: should probably do this in a more memory efficient way with batching
-    data_fft = jnp.fft.fft2(grid_data)
+    data_fft = jnp.fft.fft2(grid_data, norm='ortho')
     
     # Check if the user wants to use L-BFGS or a custom optimizer
     if use_LBFGS:        
