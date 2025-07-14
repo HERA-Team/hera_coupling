@@ -1,7 +1,8 @@
 import copy
 import numpy as np
+from astropy.constants import c
 from scipy.fft import next_fast_len
-from typing import Tuple, Union, List, Dict
+from typing import Tuple, Union, List, Dict, Optional
 
 # Jax libraries
 import jax
@@ -33,8 +34,10 @@ class RedundantCouplingManager:
     Class that handles the coupling grid for antenna positions. This class assumes that the 
     antenna positions are able to be defined on a 2D grid.
     """
-    def __init__(self, active_antpos, include_autos: bool = False, tol: float = 1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
+    def __init__(self, active_antpos, include_autos: bool = False, tol: float = 1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3, pad_grid: bool = True):
         """
+        Initialize the RedundantCouplingManager with the active antenna positions and prepare the coupling grid.
+
         Parameters:
         -----------
             active_antpos : dictionary
@@ -43,7 +46,16 @@ class RedundantCouplingManager:
                 Flag on whether to include auto correlations in visibility grid
             tol : float, default=1e-2
                 Tolerance for rounding the coordinates to the nearest integer grid.
+            ew_pair : tuple of int, default=(0, 1)
+                Antenna indices (i, j) that define the reference east-west direction.
+            ns_pair : tuple of int, default=(0, 11)
+                Antenna indices (i, j) that define the reference north-south direction.
+            ratio : int, default=3
+                Scaling factor to normalize unit vectors (default is 3).
+            pad_grid : bool, default=True
+                Whether to pad the grid shape to at least twice the maximum coordinate value.
         """
+        # Store the active antenna positions and prepare the redundant groups
         self.active_antpos = active_antpos
         self.all_reds = get_pos_reds(            
             active_antpos, 
@@ -53,7 +65,6 @@ class RedundantCouplingManager:
 
         # Extract a representative list of antenna pairs for each redundant group
         self.antpairs = [red[0] for red in self.all_reds]
-        self.antpairs += [(red[0][1], red[0][0]) for red in self.all_reds]
 
         # Initialize grid properties
         self.bl_to_grid_coords = {}
@@ -68,10 +79,11 @@ class RedundantCouplingManager:
             tol=tol,
             ew_pair=ew_pair,  # Default east-west pair
             ns_pair=ns_pair,  # Default north-south pair
-            ratio=ratio  # Default ratio for scaling the unit vectors
+            ratio=ratio,  # Default ratio for scaling the unit vectors
+            pad_grid=pad_grid,  # Default padding for the grid shape
         )
 
-    def prepare_coordinates(self, antpairs, antpos, tol: float=1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
+    def prepare_coordinates(self, antpairs, antpos, tol: float=1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3, pad_grid: bool = True):
         """
         Prepare the coordinates for the coupling grid based on the antenna pairs and positions.
 
@@ -107,11 +119,14 @@ class RedundantCouplingManager:
         
         # Set the grid shape based on the maximum coordinates
         max_coords = np.max(np.max(gridded_coords, axis=0) - np.min(gridded_coords, axis=0))
-        self.grid_shape = next_fast_len(int(2 * max_coords) + 1)
+        if pad_grid:
+            self.grid_shape = next_fast_len(int(2 * max_coords) + 1)
+        else:
+            self.grid_shape = next_fast_len(int(1.1 * max_coords) + 1)
         
         # Create a mapping from antenna pairs to their gridded coordinates
         self.bl_to_grid_coords = {
-            antpair: coord
+            antpair: coord # Use the gridded coordinates as the value
             for antpair, coord in zip(antpairs, gridded_coords)
         }
 
@@ -120,88 +135,152 @@ class RedundantCouplingManager:
             tuple(coord): bl for bl, coord in self.bl_to_grid_coords.items()
         }
 
-    def build_data_grids(
-        self, 
-        data: DataContainer, 
-        flags: DataContainer = None,
-        nsamples: DataContainer = None,
-        time_slice: slice = None,
-        freq_slice: slice = None,
-        pol: str = None,
-        **kwargs: dict
-    ) -> jnp.ndarray:
-        """
-        Build the data grid for the coupling deconvolution.
+def build_data_and_coupling_grids(
+    coupling_manager: RedundantCouplingManager,
+    data: DataContainer,
+    flags: DataContainer,
+    nsamples: DataContainer,
+    *,
+    pol: str='ee',
+    time_slice=slice(0, None),
+    freq_slice=slice(0, None),
+    window_function: str='hann',
+    **kwargs,
+):
+    """
+    TODO: should build a function that finds a good range to pull from
+    """
+    # Start by producing the noise variance for the given time and frequency slices
+    noise_var, window = estimate_windowed_noise_variance(
+        data=data,
+        flags=flags,
+        nsamples=nsamples,
+        time_slice=time_slice,
+        freq_slice=freq_slice,
+        window_function=window_function
+    )
 
-        Parameters:
-        -----------
-            data : DataContainer
-                The data container containing the visibilities to be deconvolved.
-            flags : dict
-                Dictionary containing the noise variance for each baseline.
-            nsamples : DataContainer, optional
-                The number of samples for each visibility in the data container.
-            time_slice : slice, optional
-                Time slice for the data.
-            freq_slice : slice, optional
-                Frequency slice for the data.
-            pol : str, optional
-                Polarization to select from the data.
-            **kwargs : dict
-                Additional keyword arguments for coupling parameter selection.
+    # Get all of the data which are unflagged over all times and frequencies
+    unflagged_baselines = []
+    for key in data:
+        if pol in key:
+            if np.all(~flags[key]):
+                unflagged_baselines.append(key[:2])
 
-        Returns:
-        --------
-            jnp.ndarray
-                The gridded data for the coupling deconvolution.
-        """
-        # Placeholder for actual data extraction logic
-        pass
+    # Get the usable baselines of the baselines that have been found to be unflagged
+    # over the time and frequency range
+    usable_baselines = filter_baselines(
+        coupling_manager.antpairs,
+        antpos=coupling_manager.active_antpos,
+        bls=unflagged_baselines, # Use all unflagged baselines
+        **kwargs # Pass along arguments for filtering
+    )
+    
+    # Reformat the data from DataContainer to jax array
+    data_grid, noise_array, coupling_array, coupling_idx = build_data_and_coupling_arrays(
+        coupling_manager=coupling_manager,
+        data=data,
+        noise_var=noise_var,
+        data_antpairs=unflagged_baselines,
+        coupling_antpairs=usable_baselines, # TODO: Not a great name for a parameter
+        pol=pol,
+    )
 
-    def select_coupling(
-        self, 
-        shape: Tuple[int, int],
-        pol: str = None,
-        **kwargs: dict
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """
-        """
-        pass
+    return data_grid, noise_array, coupling_array, coupling_idx, window
 
-    def filter_baselines(
-        self, 
-        data: DataContainer, 
-        nsamples: DataContainer = None,
-        flags: List[str] = None,
-        time_slice: slice = None, 
-        freq_slice: slice = None, 
-        pol: str = None,
-        include_autos: bool = False,
-        **kwargs: dict
-    ) -> List[Tuple[int, int]]:
-        """
-        Filter the baselines based on the provided time and frequency slices.
+def build_data_and_coupling_arrays(
+    coupling_manager: RedundantCouplingManager,
+    data: DataContainer,
+    noise_var: DataContainer,
+    data_antpairs: List[Tuple[int, int]],
+    coupling_antpairs: List[Tuple[int, int]],
+    pol: str,
+    *,
+    time_slice: slice=slice(0, None),
+    freq_slice: slice=slice(0, None),
+    compressed: bool=False,
+):
+    """
+    """
+    # Get the data shape for the grid size
+    ntimes, nfreqs = data[data_antpairs[0] + (pol,)][time_slice][:, freq_slice].shape
+    ngrid = coupling_manager.grid_shape
+    
+    # Build a grid for the data
+    data_grid = np.zeros((ntimes, nfreqs) + 2 * (ngrid,), dtype=complex)
+    coupling_array  = np.zeros((1, nfreqs, len(coupling_antpairs)), dtype=complex)
+    noise_array = []
+    
+    for ci, (ai, aj) in enumerate(data_antpairs):
+        if ai == aj:
+            i, j = 0, 0  # Autos centered at the origin by default
+        else:
+            i, j = coupling_manager.bl_to_grid_coords[(ai, aj)]
 
-        Parameters:
-        -----------
-            data : DataContainer
-                The data container containing the visibilities to be filtered.
-            time_slice : slice, optional
-                Time slice for the data.
-            freq_slice : slice, optional
-                Frequency slice for the data.
-            pol : str, optional
-                Polarization to select from the data.
-            **kwargs : dict
-                Additional keyword arguments for filtering.
+        # Load data into grid
+        data_grid[:, :, i, j] = data[(ai, aj, pol)][time_slice][:, freq_slice]
+        data_grid[:, :, -i, -j] = data[(aj, ai, pol)][time_slice][:, freq_slice]
 
-        Returns:
-        --------
-            List[Tuple[int, int]]
-                List of filtered antenna pairs.
-        """
-        # Placeholder for actual filtering logic
-        pass
+        # Load noise values into grid
+        if ai != aj:
+            noise_array.append(noise_var[(ai, aj, pol)])
+
+    # Array for mapping coupling parameters to grid positions
+    coupling_idx = np.zeros((len(coupling_antpairs), 2), dtype=int)
+    
+    for ci, (ai, aj) in enumerate(coupling_antpairs):
+        blmag = np.linalg.norm(data.antpos[aj] - data.antpos[ai])
+        u = data.freqs[freq_slice] * blmag / c.value
+        coupling_array[..., ci] = 1e-2 * (np.exp(2j * np.pi * u) / u)[None]
+        coupling_idx[ci] = coupling_manager.bl_to_grid_coords[(ai, aj)]
+
+    # Transpose array to shape (1, 1, nbls)
+    noise_array = np.transpose(noise_array, (1, 2, 0))
+    return data_grid, noise_array, coupling_array, coupling_idx
+
+def filter_baselines(
+    all_bls: List[Tuple[int, int]],
+    *,
+    antpos: Dict[int, np.ndarray] = None,
+    bls: Optional[List[Tuple[int, int]]] = None,
+    ex_bls: Optional[List[Tuple[int, int]]] = None,
+    max_len: Optional[float] = None,
+    max_ew: Optional[float] = None,
+    max_ns: Optional[float] = None,
+) -> List[Tuple[int, int]]:
+    """
+    Filter baselines by inclusion/exclusion lists and maximum lengths.
+    """
+    if bls is not None and ex_bls is not None:
+        raise ValueError("Only one of `bls` or `ex_bls` may be provided.")
+    if bls is not None:
+        keep = set(bls)
+        candidates = [b for b in all_bls if b in keep]
+    elif ex_bls is not None:
+        drop = set(ex_bls)
+        candidates = [b for b in all_bls if b not in drop]
+    else:
+        candidates = list(all_bls)
+        
+    if max_len is None and max_ew is None and max_ns is None:
+        return candidates
+    else:
+        assert antpos is not None, "antpos must be provided if filtering baselines by length"
+    
+    filtered = []
+    for ant1, ant2 in candidates:
+        vec = antpos[ant2] - antpos[ant1]
+        total = np.linalg.norm(vec)
+        ew = abs(vec[0])
+        ns = abs(vec[1])
+        if max_len is not None and total > max_len:
+            continue
+        if max_ew is not None and ew > max_ew:
+            continue
+        if max_ns is not None and ns > max_ns:
+            continue
+        filtered.append((ant1, ant2))
+    return filtered
 
 def project_coordinates_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
     """
@@ -361,6 +440,90 @@ def deconv_loss_function(
     
     return total_loss
 
+def estimate_windowed_noise_variance(
+    data: DataContainer, 
+    flags: DataContainer,
+    nsamples: DataContainer,
+    time_slice: slice, 
+    freq_slice: slice, 
+    window_function: str = "tukey", 
+) -> Dict[Tuple[int, int, str], jnp.ndarray]:
+    """
+    Estimate the windowed noise variance for the coupling deconvolution. Used to set the
+    noise scale for the coupling deconvolution.
+
+    Parameters:
+    -----------
+        data : DataContainer
+            The data container containing the visibilities to be deconvolved.
+            Autocorrelations must be included in the data container.
+        nsamples : DataContainer
+            The number of samples for each visibility in the data container.
+        time_slice : slice
+            Time slice for the data.
+        freq_slice : slice
+            Frequency slice for the data.
+        window_function : str, optional
+            The window function to apply (default: "tukey").
+
+    Returns:
+    --------
+        noise_scale : jnp.ndarray
+            The estimated noise scale for the coupling deconvolution.
+    """
+    # Get the window function for the frequency and time slices
+    freq_window = dspec.gen_window(
+        window_function,
+        data.freqs[freq_slice].size,
+    )
+    time_window = dspec.gen_window(
+        window_function,
+        data.times[time_slice].size,
+    )
+    window = np.outer(time_window, freq_window)
+    
+    # Calculate the equivalent noise bandwidth for the window function
+    enbw = np.mean(window ** 2) / np.mean(window) ** 2
+    
+    # Dictionary to hold the noise variance for each baseline
+    noise_var = {}
+
+    # Extract the relevant data from the data container
+    for key in data:
+        ant1, ant2 = utils.split_bl(key)
+        ap1, ap2 = utils.split_pol(key[-1])
+
+        auto_ant1 = (ant1[0], ant1[0], utils.join_pol(ap1, ap1))
+        auto_ant2 = (ant2[0], ant2[0], utils.join_pol(ap2, ap2))
+
+        auto1, auto2 = (
+            data[auto_ant1][time_slice][:, freq_slice], 
+            data[auto_ant2][time_slice][:, freq_slice]
+        )
+
+        # Calculate the time and frequency intervals
+        dt = np.diff(data.times)[0] * 3600 * 24  # Convert to seconds
+        df = np.diff(data.freqs)[0]
+
+        # nsamples & flags for this baseline
+        ns = nsamples[key][time_slice][:, freq_slice]
+        fl = flags[key][time_slice][:, freq_slice]
+
+        # mask out any cells where ns==0 or flagged=True
+        valid = (ns > 0) & (~fl)
+
+        variance = (
+            np.abs(auto1) * np.abs(auto2) / (ns * dt * df)
+        ) * enbw
+        variance = np.where(valid, variance, np.nan)
+
+        # Calculate the noise scale for the autocorrelations
+        noise_var[key] = np.nanmean(variance, axis=(0, 1), keepdims=True)  # Average over time and frequency
+
+    # Convert the noise variance to a DataContainer
+    noise_var = DataContainer(noise_var)
+
+    return noise_var, window
 
 def fit_coupling_redundantly_averaged(
     coupling_parameters: jnp.ndarray, 
@@ -456,7 +619,6 @@ def fit_coupling_redundantly_averaged(
                 noise=noise,
                 idx=idx, 
                 window=window, 
-                alpha=alpha,
                 lambda_reg=lambda_reg,
             )
             
@@ -573,78 +735,6 @@ def fit_coupling_parameters(
     RedUVCoupling = coupling
 
     return fit_parameters
-
-    
-def estimate_windowed_noise_variance(
-    data: DataContainer, 
-    nsamples: DataContainer,
-    time_slice: slice, 
-    freq_slice: slice, 
-    window_function: str = "tukey", 
-) -> Dict[Tuple[int, int, str], jnp.ndarray]:
-    """
-    Estimate the windowed noise variance for the coupling deconvolution. Used to set the
-    noise scale for the coupling deconvolution.
-
-    Parameters:
-    -----------
-        data : DataContainer
-            The data container containing the visibilities to be deconvolved.
-            Autocorrelations must be included in the data container.
-        nsamples : DataContainer
-            The number of samples for each visibility in the data container.
-        time_slice : slice
-            Time slice for the data.
-        freq_slice : slice
-            Frequency slice for the data.
-        window_function : str, optional
-            The window function to apply (default: "tukey").
-
-    Returns:
-    --------
-        noise_scale : jnp.ndarray
-            The estimated noise scale for the coupling deconvolution.
-    """
-    # Get the window function for the frequency and time slices
-    freq_window = dspec.get_window(
-        window_function,
-        data.freqs[freq_slice].size,
-    )
-    time_window = dspec.get_window(
-        window_function,
-        data.times[time_slice].size,
-    )
-    window = jnp.outer(time_window, freq_window)
-    
-    # Calculate the equivalent noise bandwidth for the window function
-    enbw = np.mean(window ** 2) / np.mean(window) ** 2
-    
-    # Dictionary to hold the noise variance for each baseline
-    noise_var = {}
-
-    # Extract the relevant data from the data container
-    for key in data:
-        ant1, ant2 = utils.split_bl(key)
-        ap1, ap2 = utils.split_pol(key[-1])
-
-        auto_ant1 = (ant1[0], ant1[0], utils.join_pol(ap1, ap1))
-        auto_ant2 = (ant2[0], ant2[0], utils.join_pol(ap2, ap2))
-
-        auto1, auto2 = (
-            data[auto_ant1][time_slice][:, freq_slice], 
-            data[auto_ant2][time_slice][:, freq_slice]
-        )
-
-        ns = nsamples[key]
-        dt = np.diff(data.times) * 3600 * 24  # Convert to seconds
-        df = np.diff(data.freqs)
-
-        # Calculate the noise scale for the autocorrelations
-        noise_var[key] = (
-            np.mean(np.abs(auto1) * np.abs(auto2), keepdims=True) / (ns * dt * df)
-        ) * enbw
-
-    return noise_var
     
 class RedUVCoupling:
     """
