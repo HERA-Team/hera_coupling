@@ -149,6 +149,40 @@ def build_data_and_coupling_grids(
 ):
     """
     TODO: should build a function that finds a good range to pull from
+
+    Build the data grid and coupling arrays for the given data and coupling manager.
+
+    Parameters:
+    -----------
+    coupling_manager : RedundantCouplingManager
+        The coupling manager that handles the antenna positions and grid coordinates.
+    data : DataContainer
+        The data container containing the visibilities to be gridded.
+    flags : DataContainer
+        The flags for the data, indicating which visibilities are valid.
+    nsamples : DataContainer
+        The number of samples for each visibility in the data container.
+    pol : str, optional
+        Polarization string (e.g., 'ee', 'nn', etc.) to select the appropriate data (default: 'ee').
+    time_slice : slice, optional
+        Slice for the time dimension of the data (default: slice(0, None)).
+    freq_slice : slice, optional
+        Slice for the frequency dimension of the data (default: slice(0, None)).
+    window_function : str, optional
+        The window function to apply to the data (default: 'hann').
+    **kwargs : dict
+        Additional keyword arguments for filtering baselines, such as `max_len`, `max_ew`, `max_ns`, etc.
+
+    Returns:
+    --------
+    data_grid : np.ndarray
+        The gridded data array of shape (ntimes, nfreqs, ngrid, ngrid).
+    noise_array : np.ndarray
+        The noise variance array for the coupling parameters of shape (1, nfreqs, ncoupling_antpairs).
+    coupling_array : np.ndarray
+        The coupling parameters array of shape (1, nfreqs, ncoupling_antpairs).
+    coupling_idx : np.ndarray
+        The indices of the coupling parameters in the grid of shape (ncoupling_antpairs, 2).
     """
     # Start by producing the noise variance for the given time and frequency slices
     noise_var, window = estimate_windowed_noise_variance(
@@ -201,6 +235,39 @@ def build_data_and_coupling_arrays(
     compressed: bool=False,
 ):
     """
+    Build the data grid and coupling arrays for the given data and coupling manager.
+
+    Parameters:
+    -----------
+    coupling_manager : RedundantCouplingManager
+        The coupling manager that handles the antenna positions and grid coordinates.
+    data : DataContainer
+        The data container containing the visibilities to be gridded.
+    noise_var : DataContainer
+        The noise variance for the data, used to scale the coupling parameters.
+    data_antpairs : list of tuple of int
+        List of antenna pairs for the data to be gridded.
+    coupling_antpairs : list of tuple of int
+        List of antenna pairs for the coupling parameters.
+    pol : str
+        Polarization string (e.g., 'ee', 'nn', etc.) to select the appropriate data.
+    time_slice : slice, optional
+        Slice for the time dimension of the data (default: slice(0, None)).
+    freq_slice : slice, optional
+        Slice for the frequency dimension of the data (default: slice(0, None)).
+    compressed : bool, optional
+        Whether to compress the data grid (default: False).
+
+    Returns:
+    --------
+    data_grid : np.ndarray
+        The gridded data array of shape (ntimes, nfreqs, ngrid, ngrid).
+    noise_array : np.ndarray
+        The noise variance array for the coupling parameters of shape (1, nfreqs, ncoupling_antpairs).
+    coupling_array : np.ndarray
+        The coupling parameters array of shape (1, nfreqs, ncoupling_antpairs).
+    coupling_idx : np.ndarray
+        The indices of the coupling parameters in the grid of shape (ncoupling_antpairs, 2).
     """
     # Get the data shape for the grid size
     ntimes, nfreqs = data[data_antpairs[0] + (pol,)][time_slice][:, freq_slice].shape
@@ -250,6 +317,28 @@ def filter_baselines(
 ) -> List[Tuple[int, int]]:
     """
     Filter baselines by inclusion/exclusion lists and maximum lengths.
+
+    Parameters
+    ----------
+    all_bls : list of tuple of int
+        List of all baseline pairs [(i1, j1), (i2, j2), ...].
+    antpos : dict, optional
+        Dictionary of antenna positions {ant_index: position_vector}.
+    bls : list of tuple of int, optional
+        List of baselines to include. If provided, only these baselines will be kept.
+    ex_bls : list of tuple of int, optional
+        List of baselines to exclude. If provided, these baselines will be removed.
+    max_len : float, optional
+        Maximum length of the baseline to keep. If provided, only baselines with length <= max_len will be kept.
+    max_ew : float, optional
+        Maximum east-west component of the baseline to keep. If provided, only baselines with ew <= max_ew will be kept.
+    max_ns : float, optional
+        Maximum north-south component of the baseline to keep. If provided, only baselines with ns <= max_ns will be kept.
+
+    Returns
+    -------
+    list of tuple of int
+        Filtered list of baseline pairs that meet the specified criteria.
     """
     if bls is not None and ex_bls is not None:
         raise ValueError("Only one of `bls` or `ex_bls` may be provided.")
