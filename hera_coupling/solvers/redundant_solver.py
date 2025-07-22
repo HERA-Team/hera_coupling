@@ -1,5 +1,6 @@
 import copy
 import numpy as np
+from functools import partial
 from astropy.constants import c
 from scipy.fft import next_fast_len
 from typing import Tuple, Union, List, Dict, Optional
@@ -34,7 +35,7 @@ class RedundantCouplingManager:
     Class that handles the coupling grid for antenna positions. This class assumes that the 
     antenna positions are able to be defined on a 2D grid.
     """
-    def __init__(self, active_antpos, include_autos: bool = False, tol: float = 1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3, pad_grid: bool = True):
+    def __init__(self, active_antpos, tol: float = 1e-2, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3, pad_grid: bool = True):
         """
         Initialize the RedundantCouplingManager with the active antenna positions and prepare the coupling grid.
 
@@ -59,7 +60,7 @@ class RedundantCouplingManager:
         self.active_antpos = active_antpos
         self.all_reds = get_pos_reds(            
             active_antpos, 
-            include_autos=include_autos
+            include_autos=True,
         )
         self.tol = tol
 
@@ -145,6 +146,8 @@ def build_data_and_coupling_grids(
     time_slice=slice(0, None),
     freq_slice=slice(0, None),
     window_function: str='hann',
+    skip_autos: bool=False,
+    compressed=False,
     **kwargs,
 ):
     """
@@ -196,7 +199,9 @@ def build_data_and_coupling_grids(
 
     # Get all of the data which are unflagged over all times and frequencies
     unflagged_baselines = []
+    all_baselines = [] # TODO: Temporary change to fix ordering error
     for key in data:
+        all_baselines.append(key[:2])
         if pol in key:
             if np.all(~flags[key]):
                 unflagged_baselines.append(key[:2])
@@ -204,14 +209,14 @@ def build_data_and_coupling_grids(
     # Get the usable baselines of the baselines that have been found to be unflagged
     # over the time and frequency range
     usable_baselines = filter_baselines(
-        coupling_manager.antpairs,
+        all_baselines,
         antpos=coupling_manager.active_antpos,
         bls=unflagged_baselines, # Use all unflagged baselines
         **kwargs # Pass along arguments for filtering
     )
     
     # Reformat the data from DataContainer to jax array
-    data_grid, noise_array, coupling_array, coupling_idx = build_data_and_coupling_arrays(
+    data_grid, noise_array, data_idx, coupling_array, coupling_idx, fit_idx = build_data_and_coupling_arrays(
         coupling_manager=coupling_manager,
         data=data,
         noise_var=noise_var,
@@ -220,9 +225,11 @@ def build_data_and_coupling_grids(
         pol=pol,
         time_slice=time_slice,
         freq_slice=freq_slice,
+        skip_autos=skip_autos,
+        compressed=compressed,
     )
 
-    return data_grid, noise_array, coupling_array, coupling_idx, window
+    return data_grid, noise_array, data_idx, coupling_array, coupling_idx, fit_idx, window
 
 def build_data_and_coupling_arrays(
     coupling_manager: RedundantCouplingManager,
@@ -234,6 +241,7 @@ def build_data_and_coupling_arrays(
     *,
     time_slice: slice=slice(0, None),
     freq_slice: slice=slice(0, None),
+    skip_autos: bool=False,
     compressed: bool=False,
 ):
     """
@@ -265,7 +273,9 @@ def build_data_and_coupling_arrays(
     data_grid : np.ndarray
         The gridded data array of shape (ntimes, nfreqs, ngrid, ngrid).
     noise_array : np.ndarray
-        The noise variance array for the coupling parameters of shape (1, nfreqs, ncoupling_antpairs).
+        The noise variance array for the coupling parameters of shape (1, nfreqs, ndata_antpairs).
+    data_idx : np.ndarray
+        The indices of the data in the grid of shape (ndata_antpairs, 2).
     coupling_array : np.ndarray
         The coupling parameters array of shape (1, nfreqs, ncoupling_antpairs).
     coupling_idx : np.ndarray
@@ -276,25 +286,44 @@ def build_data_and_coupling_arrays(
     ngrid = coupling_manager.grid_shape
     
     # Build a grid for the data
-    data_grid = np.zeros((ntimes, nfreqs) + 2 * (ngrid,), dtype=complex)
-    coupling_array  = np.zeros((1, nfreqs, len(coupling_antpairs)), dtype=complex)
+    if compressed:
+        data_array = []
+    else:
+        data_array = np.zeros((ntimes, nfreqs, ngrid, ngrid), dtype=complex)
+
+    coupling_array = np.zeros((1, nfreqs, len(coupling_antpairs)), dtype=complex)
+    
+    # Initialize arrays for noise variance and indices
     noise_array = []
-    data_idx = np.zeros((len(data_antpairs), 2), dtype=int)
+    data_idx = []
+    fit_idx = []
     
     for ci, (ai, aj) in enumerate(data_antpairs):
         if ai == aj:
+            if skip_autos:
+                continue
             i, j = 0, 0  # Autos centered at the origin by default
         else:
+            # Get the grid coordinates for the baseline
             i, j = coupling_manager.bl_to_grid_coords[(ai, aj)]
-            data_idx[ci] = (i, j) # Only look at the crosses in optimization
 
-        # Load data into grid
-        data_grid[:, :, i, j] = data[(ai, aj, pol)][time_slice][:, freq_slice]
-        data_grid[:, :, -i, -j] = data[(aj, ai, pol)][time_slice][:, freq_slice]
+            # Only optimize the coupling parameters for non-auto baselines
+            fit_idx.append((i, j))
+            noise_array.append(noise_var[(ai, aj, pol)]) 
 
-        # Load noise values into grid
-        if ai != aj:
-            noise_array.append(noise_var[(ai, aj, pol)])
+        # Add indices to the data_idx list
+        data_idx.append((i, j)) 
+
+        # Load data into grid or compressed array
+        if compressed:
+            data_array.append(data[(ai, aj, pol)][time_slice][:, freq_slice])
+        else:
+            data_array[:, :, i, j] = data[(ai, aj, pol)][time_slice][:, freq_slice]
+            data_array[:, :, -i, -j] = data[(aj, ai, pol)][time_slice][:, freq_slice]
+
+    if compressed:
+        # Transpose to (ntimes, nfreqs, nbls)
+        data_array = np.transpose(data_array, (1, 2, 0))
 
     # Array for mapping coupling parameters to grid positions
     coupling_idx = np.zeros((len(coupling_antpairs), 2), dtype=int)
@@ -307,7 +336,13 @@ def build_data_and_coupling_arrays(
 
     # Transpose array to shape (1, 1, nbls)
     noise_array = np.transpose(noise_array, (1, 2, 0))
-    return data_grid, noise_array, data_idx, coupling_array, coupling_idx
+
+    # Convert lists to numpy arrays
+    data_idx = np.array(data_idx, dtype=int)
+    fit_idx = np.array(fit_idx, dtype=int)
+    coupling_idx = np.array(coupling_idx, dtype=int)
+
+    return data_array, noise_array, data_idx, coupling_array, coupling_idx, fit_idx
 
 def filter_baselines(
     all_bls: List[Tuple[int, int]],
@@ -320,7 +355,7 @@ def filter_baselines(
     max_ns: Optional[float] = None,
 ) -> List[Tuple[int, int]]:
     """
-    Filter baselines by inclusion/exclusion lists and maximum lengths.
+    Filter baselines by inclusion/exclusion lists and maximum lengths while preserving order.
 
     Parameters
     ----------
@@ -342,37 +377,55 @@ def filter_baselines(
     Returns
     -------
     list of tuple of int
-        Filtered list of baseline pairs that meet the specified criteria.
+        Filtered list of baseline pairs that meet the specified criteria, preserving original order.
     """
     if bls is not None and ex_bls is not None:
         raise ValueError("Only one of `bls` or `ex_bls` may be provided.")
+    
+    # Create sets for O(1) lookup while preserving order through iteration
     if bls is not None:
-        keep = set(bls)
-        candidates = [b for b in all_bls if b in keep]
-    elif ex_bls is not None:
-        drop = set(ex_bls)
-        candidates = [b for b in all_bls if b not in drop]
-    else:
-        candidates = list(all_bls)
-        
-    if max_len is None and max_ew is None and max_ns is None:
-        return candidates
-    else:
+        keep_set = set(bls)
+    if ex_bls is not None:
+        drop_set = set(ex_bls)
+    
+    # Check if we need length calculations
+    need_length_calc = any(x is not None for x in [max_len, max_ew, max_ns])
+    if need_length_calc:
         assert antpos is not None, "antpos must be provided if filtering baselines by length"
     
     filtered = []
-    for ant1, ant2 in candidates:
-        vec = antpos[ant2] - antpos[ant1]
-        total = np.linalg.norm(vec)
-        ew = abs(vec[0])
-        ns = abs(vec[1])
-        if max_len is not None and total > max_len:
+    
+    # Single pass through all_bls to preserve order
+    for bl in all_bls:
+        ant1, ant2 = bl
+        
+        # Skip auto-baselines
+        if ant1 == ant2:
             continue
-        if max_ew is not None and ew > max_ew:
+            
+        # Apply inclusion/exclusion filters
+        if bls is not None and bl not in keep_set:
             continue
-        if max_ns is not None and ns > max_ns:
+        if ex_bls is not None and bl in drop_set:
             continue
-        filtered.append((ant1, ant2))
+            
+        # Apply length-based filters if needed
+        if need_length_calc:
+            vec = antpos[ant2] - antpos[ant1]
+            total = np.linalg.norm(vec)
+            ew = abs(vec[0])
+            ns = abs(vec[1])
+            
+            if max_len is not None and total > max_len:
+                continue
+            if max_ew is not None and ew > max_ew:
+                continue
+            if max_ns is not None and ns > max_ns:
+                continue
+        
+        # Baseline passed all filters
+        filtered.append(bl)
+    
     return filtered
 
 def project_coordinates_to_grid(antpairs, antpos, ew_pair=(0, 1), ns_pair=(0, 11), ratio: int = 3):
@@ -437,8 +490,72 @@ def _scaled_log_1p_normalized(data):
     """
     return jnp.log1p(data)
 
+@partial(jax.jit, static_argnames=['ngrid'])
+def grid_coupling_array(data, indices, ngrid):
+    """
+    Grid baseline data onto a 2D grid using indices.
+    
+    Args:
+        data: Array of shape (..., nbls) containing baseline data
+        indices: Array of shape (nbls, 2) containing grid positions for each baseline
+        ngrid: Size of the square grid
+    
+    Returns:
+        Gridded array of shape (..., ngrid, ngrid)
+    """
+    batch_shape = data.shape[:-1]
+    grid = jnp.zeros(batch_shape + (ngrid, ngrid), dtype=data.dtype)
+    
+    i_coords = indices[:, 0]
+    j_coords = indices[:, 1]
+    
+    grid = grid.at[..., i_coords, j_coords].set(data)
+    grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
+    grid = grid.at[..., 0, 0].set(1.0)
+    return grid
+
+@partial(jax.jit, static_argnames=['ngrid'])
+def grid_data_array(data, indices, ngrid):
+    """
+    Grid baseline data onto a 2D grid using indices.
+    
+    Args:
+        data: Array of shape (..., nbls) containing baseline data
+        indices: Array of shape (nbls, 2) containing grid positions for each baseline
+        ngrid: Size of the square grid
+    
+    Returns:
+        Gridded array of shape (..., ngrid, ngrid)
+    """
+    batch_shape = data.shape[:-1]
+    grid = jnp.zeros(batch_shape + (ngrid, ngrid), dtype=data.dtype)
+    
+    i_coords = indices[:, 0]
+    j_coords = indices[:, 1]
+    
+    grid = grid.at[..., i_coords, j_coords].set(data)
+    grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
+    return grid
+
 @jax.jit
-def deconvolve_visibilities(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp.ndarray:
+def degrid_array(gridded_data, indices):
+    """
+    Extract baseline data from gridded array using indices.
+    
+    Args:
+        gridded_data: Array of shape (..., ngrid, ngrid)
+        indices: Array of shape (nbls, 2) containing grid positions
+    
+    Returns:
+        Baseline data of shape (..., nbls)
+    """
+    i_coords = indices[:, 0]
+    j_coords = indices[:, 1]
+    
+    return gridded_data[..., i_coords, j_coords]
+
+@jax.jit
+def fft_deconvolve(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp.ndarray:
     """
     Deconvolve visibilities using the provided parameters and FFT of the data.
 
@@ -455,8 +572,88 @@ def deconvolve_visibilities(coupling: jnp.ndarray, data_fft: jnp.ndarray) -> jnp
     """
     preturbed_beam = jnp.fft.fft2(coupling)
     div = data_fft * (1 / preturbed_beam)
-    deconvolved = jnp.fft.ifft2(div, norm='ortho')
+    deconvolved = jnp.fft.ifft2(div)
     return deconvolved
+
+@partial(jax.jit, static_argnames=['ngrid'])
+def fft_deconvolve_low_memory(
+    data: jnp.ndarray, 
+    coupling: jnp.ndarray, 
+    indices: jnp.ndarray, 
+    coupling_indices: jnp.ndarray, 
+    fit_indices: jnp.ndarray, 
+    ngrid: int
+) -> jnp.ndarray:
+    """
+    Memory-efficient FFT convolution using scan across frequency.
+    Processes one frequency at a time while handling all time steps together.
+    
+    TODO: There are lots of indices here that could be cleaned up.
+
+    Args:
+        data: 
+            Array of shape (ntimes, nfreqs, nbls)
+        coupling: 
+            Array of shape (1, nfreqs, nbls)
+        indices: 
+            Array of shape (nbls, 2) that specifies the grid positions for each baseline.
+        coupling_indices: 
+            Array of shape (ncoupling, 2) that specifies the coupling parameters.
+        fit_indices:
+            Array of shape (n_fit_baselines, 2) that specifies the baselines used in the fitting process.
+        ngrid: 
+            Grid size
+    
+    Returns:
+        Deconvolved result of shape (ntimes, nfreqs, nbls)
+    """
+    ntimes, nfreqs, nbls = data.shape
+    coupling_squeezed = coupling[0]  # (nfreqs, nbls)
+    
+    def scan_frequency(carry, inputs):
+        """
+        Process a single frequency across all time steps.
+        
+        Args:
+            carry: Unused (scan requires carry argument)
+            inputs: Tuple of (data, coupling) where:
+                data: Array of shape (ntimes, nbls)
+                coupling: Array of shape (nbls,)
+        
+        Returns:
+            carry: Unused
+            result: Deconvolved result for this frequency (ntimes, nbls)
+        """
+        data, coupling = inputs
+        
+        # Grid both arrays for this frequency
+        data_grid = grid_data_array(data, indices, ngrid)  # (ntimes, ngrid, ngrid)
+        coupling_grid = grid_coupling_array(coupling, coupling_indices, ngrid)  # (ngrid, ngrid)
+        
+        # Take FFTs
+        data_fft = jnp.fft.fft2(data_grid)  # (ntimes, ngrid, ngrid)
+        coupling_fft = jnp.fft.fft2(coupling_grid)  # (ngrid, ngrid)
+
+        # Convolve (broadcast coupling across time)
+        # div = data_fft * (1 / coupling_fft[None, ...])  # (ntimes, ngrid, ngrid)
+        div = data_fft * (1 / coupling_fft)
+        deconvolved = jnp.fft.ifft2(div)  # (ntimes, ngrid, ngrid)
+
+        # Degrid back to baseline format
+        result = degrid_array(deconvolved, fit_indices)  # (ntimes, nbls)
+        
+        return carry, result
+    
+    # Transpose data to (nfreqs, ntimes, nbls) for scanning
+    data_tranposed = jnp.transpose(data, (1, 0, 2))
+    
+    # Use scan to process each frequency sequentially
+    _, results = jax.lax.scan(
+        scan_frequency, None, (data_tranposed, coupling_squeezed)
+    )
+    
+    # Transpose back to (ntimes, nfreqs, nbls)
+    return jnp.transpose(results, (1, 0, 2))
 
 @jax.jit
 def deconv_loss_function(
@@ -465,7 +662,6 @@ def deconv_loss_function(
     noise: jnp.ndarray,
     coupling_idx: jnp.ndarray,
     data_idx: jnp.ndarray,
-    window: jnp.ndarray,
     lambda_reg: float = 0.0,
 ) -> jnp.ndarray:
     """
@@ -476,11 +672,13 @@ def deconv_loss_function(
         parameters : dict
             Parameters for the deconvolution. 
         data_fft : jnp.ndarray
-            FFT of the input data.
+            FFT of the input data. (ntimes, nfreqs, ngrid, ngrid)
         noise : jnp.ndarray
             Noise variance for the data.
-        idx : jnp.ndarray
+        coupling_idx : jnp.ndarray
             Indices for the data to be deconvolved.
+        data_idx : jnp.ndarray
+            Indices for the coupling parameters in the grid.
         window : jnp.ndarray
             Window function applied to the data.
         lambda_reg : float, optional
@@ -505,16 +703,16 @@ def deconv_loss_function(
     coupling = coupling.at[:, :, 0, 0].add(1)
     
     # Deconvolve coupling data using FFT
-    data_deconv = deconvolve_visibilities(
+    data_deconv = fft_deconvolve(
         coupling=coupling, 
         data_fft=data_fft
     )
 
     # Extract deconvolved data for the specified indices, applying the window function, and compute the FFT
     data_deconv_fft = jnp.fft.fft2(
-        data_deconv[:, :, data_idx[:, 0], data_idx[:, 1]] * window, 
-        axes=(0, 1), 
-        norm='ortho'
+        data_deconv[:, :, data_idx[:, 0], data_idx[:, 1]],
+        axes=(0, 1),
+        norm="ortho" # Normalize the FFT
     )
     
     # Minimize the size of the coupling parameters
@@ -525,7 +723,58 @@ def deconv_loss_function(
     # Compute the delay fringe sparsity
     delay_fringe_sparsity = jnp.mean(
         _scaled_log_1p_normalized(
-            jnp.abs(data_deconv_fft) ** 2 / noise ** 2
+            jnp.abs(data_deconv_fft) ** 2 / noise
+        )
+    )
+    
+    # Combine the loss components
+    total_loss = (
+        delay_fringe_sparsity +
+        lambda_reg * param_sparsity_term
+    )
+    
+    return total_loss
+
+@partial(jax.jit, static_argnames=['ngrid'])
+def deconv_loss_function_batched(
+    parameters: dict,
+    data: jnp.ndarray,
+    noise: jnp.ndarray,
+    coupling_idx: jnp.ndarray,
+    data_idx: jnp.ndarray,
+    fit_idx: jnp.ndarray,
+    ngrid: int,
+    lambda_reg: float=0.0,
+):
+    """
+    """
+    data_deconv = fft_deconvolve_low_memory(
+        data, 
+        parameters['coupling'], 
+        data_idx, 
+        coupling_idx, 
+        fit_idx,
+        ngrid
+    )
+
+    # Extract coupling parameters
+    coupling_params = parameters['coupling']
+    
+    # Extract deconvolved data for the specified indices, applying the window function, and compute the FFT
+    data_deconv_fft = jnp.fft.fft2(
+        data_deconv,
+        axes=(0, 1), 
+        norm="ortho"
+    )
+    
+    # Minimize the size of the coupling parameters
+    param_sparsity_term = jnp.sum(
+        jnp.abs(coupling_params) ** 2
+    )
+    
+    delay_fringe_sparsity = jnp.mean(
+        _scaled_log_1p_normalized(
+            jnp.abs(data_deconv_fft) ** 2 / noise
         )
     )
     
@@ -626,8 +875,12 @@ def fit_coupling_redundantly_averaged(
     coupling_parameters: jnp.ndarray, 
     grid_data: jnp.ndarray, 
     noise: jnp.ndarray, 
-    idx: jnp.ndarray, 
-    window: jnp.ndarray, 
+    coupling_idx: jnp.ndarray, 
+    data_idx: jnp.ndarray,
+    window: jnp.ndarray,
+    fit_idx: jnp.ndarray = None,
+    ngrid: int = None,
+    compressed: bool = False,
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
@@ -650,8 +903,15 @@ def fit_coupling_redundantly_averaged(
             Initial parameters to be optimized. Should have shape (nparams, nfreqs)
         grid_data : jnp.ndarray
             Input grid data for optimization
+        noise : jnp.ndarray
+            Noise variance for the data, used to scale the coupling parameters
+        coupling_idx : jnp.ndarray
+            Indices for the coupling parameters in the grid of shape (ncoupling_antpairs,
+            2).
+        data_idx : jnp.ndarray
+            Indices for the data to be deconvolved in the grid of shape (ndata_ant
         window : jnp.ndarray
-            Window function applied to the data
+            Window function applied to the data of shape (ntimes, nfreqs).
         lamb : float, optional
             Regularization parameter (default: 1e-3)
         maxiter : int, optional
@@ -668,20 +928,46 @@ def fit_coupling_redundantly_averaged(
         Tuple[dict, Union[dict, List[float]]]
             Optimized parameters and metadata/loss history
     """
+    # Check if the data is compressed
+    if compressed and ngrid is None:
+        raise ValueError("ngrid must be provided if data is compressed")
+    if compressed and fit_idx is None:
+        raise ValueError("fit_idx must be provided if data is compressed")
+    
     # TODO: Should do some validation checks of the inputs here
-    parameters = {
+    model_params = {
         'coupling': coupling_parameters
     }
-
-    # Compute FFT of input data
-    # TODO: should probably do this in a more memory efficient way with batching
-    data_fft = jnp.fft.fft2(grid_data, norm='ortho')
+    
+    # Prepare the optimization to handle compressed data
+    if not compressed:
+        data_fft = jnp.fft.fft2(grid_data * window[..., None, None])
+        loss_function = partial(
+            deconv_loss_function,
+            data_fft=data_fft,
+            noise=noise,
+            coupling_idx=coupling_idx,
+            data_idx=data_idx,
+            lambda_reg=lambda_reg,
+        )
+    else:
+        data = grid_data * window[..., None]
+        loss_function = partial(
+            deconv_loss_function_batched,
+            data=data,
+            noise=noise,
+            coupling_idx=coupling_idx,
+            data_idx=data_idx,
+            ngrid=int(ngrid),
+            fit_idx=fit_idx,
+            lambda_reg=lambda_reg,
+        )
     
     # Check if the user wants to use L-BFGS or a custom optimizer
     if use_LBFGS:        
         # Use L-BFGS optimizer
         solver = jaxopt.LBFGS(
-            fun=deconv_loss_function, 
+            fun=loss_function, 
             tol=tol, 
             maxiter=maxiter,
             verbose=verbose,
@@ -690,12 +976,7 @@ def fit_coupling_redundantly_averaged(
         )
 
         solved_parameters, meta = solver.run(
-            parameters,  
-            data_fft=data_fft, 
-            noise=noise,
-            idx=idx, 
-            window=window, 
-            lambda_reg=lambda_reg,
+            model_params,  
         )
 
         return solved_parameters, meta
@@ -705,23 +986,18 @@ def fit_coupling_redundantly_averaged(
         if optimizer is None:
             raise ValueError("Must provide an optimizer when use_LBFGS is False")
         
-        opt_state = optimizer.init(parameters)
+        opt_state = optimizer.init(model_params)
         loss_history = []
         
         for nit in tqdm.tqdm(range(maxiter), desc="Optimization Progress"):
             # Compute loss and gradients
-            loss_value, grads = jax.value_and_grad(deconv_loss_function)(
-                parameters,  
-                data_fft=data_fft, 
-                noise=noise,
-                idx=idx, 
-                window=window, 
-                lambda_reg=lambda_reg,
+            loss_value, grads = jax.value_and_grad(loss_function)(
+                model_params,
             )
             
             # Update parameters
             updates, opt_state = optimizer.update(grads, opt_state)
-            parameters = optax.apply_updates(parameters, updates)
+            model_params = optax.apply_updates(model_params, updates)
             
             # Track loss history
             loss_history.append(loss_value)
@@ -732,7 +1008,7 @@ def fit_coupling_redundantly_averaged(
                     print(f"Converged after {nit+1} iterations")
                 break
         
-        return parameters, loss_history
+        return model_params, loss_history
     
 def fit_coupling_parameters(
     coupling_grid: RedundantCouplingManager,
