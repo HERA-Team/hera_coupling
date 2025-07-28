@@ -289,7 +289,8 @@ def _build_data_and_coupling_arrays(
     ntimes, nfreqs = data[data_antpairs[0] + (pol,)][time_slice][:, freq_slice].shape
 
     grid_coords = np.array([coupling_manager.bl_to_grid_coords[bl] for bl in data_antpairs])
-    ngrid = np.abs(np.max(grid_coords, axis=0) - np.min(grid_coords, axis=0)).max()
+    diff = np.abs(np.max(grid_coords, axis=0) - np.min(grid_coords, axis=0)).max()
+    ngrid = next_fast_len(int(1.1 * diff) + 1)
     
     # Build a grid for the data
     if compressed:
