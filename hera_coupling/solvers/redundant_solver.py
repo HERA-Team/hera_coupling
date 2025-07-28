@@ -203,7 +203,7 @@ def build_data_and_coupling_grids(
     for key in data:
         all_baselines.append(key[:2])
         if pol in key:
-            if np.all(~flags[key]):
+            if np.all(~flags[key][time_slice][:, freq_slice]):
                 unflagged_baselines.append(key[:2])
 
     # Get the usable baselines of the baselines that have been found to be unflagged
@@ -216,7 +216,7 @@ def build_data_and_coupling_grids(
     )
     
     # Reformat the data from DataContainer to jax array
-    data_grid, noise_array, data_idx, coupling_array, coupling_idx, fit_idx = build_data_and_coupling_arrays(
+    data_grid, noise_array, data_idx, coupling_array, coupling_idx, fit_idx = _build_data_and_coupling_arrays(
         coupling_manager=coupling_manager,
         data=data,
         noise_var=noise_var,
@@ -231,7 +231,7 @@ def build_data_and_coupling_grids(
 
     return data_grid, noise_array, data_idx, coupling_array, coupling_idx, fit_idx, window
 
-def build_data_and_coupling_arrays(
+def _build_data_and_coupling_arrays(
     coupling_manager: RedundantCouplingManager,
     data: DataContainer,
     noise_var: DataContainer,
@@ -1010,105 +1010,7 @@ def fit_coupling_redundantly_averaged(
         
         return model_params, loss_history
     
-def fit_coupling_parameters(
-    coupling_grid: RedundantCouplingManager,
-    data: DataContainer,
-    nsamples: DataContainer,
-    time_slice: slice,
-    freq_slice: slice, 
-    window_function: str="tukey", 
-    use_LBFGS: bool=True,
-    maxiter: int=100,
-    history_size: int=10,
-    linesearch: str="zoom",
-    tol: float=1e-6,
-    alpha: float=1e-3,
-    lambda_reg: float=1e-3,
-    verbose: bool=False,
-    **kwargs: dict
-) -> dict:
-    """
-    Fit for time-independent coupling parameters using FFTs of the gridded data.
 
-    Parameters:
-    -----------
-    data : DataContainer
-        The data container containing the visibilities to be deconvolved.
-    time_slice : slice
-        Time slice for the data.
-    freq_slice : slice
-        Frequency slice for the data.
-    window_function : str, optional
-        The window function to apply (default: "tukey").
-    use_LBFGS : bool, optional
-        Whether to use L-BFGS optimizer (default: True).
-    
-    Returns:
-    --------
-    fit_parameters : dict
-        The fitted coupling parameters.
-    """
-    # Get the number of times and frequencies in the slices
-    ntimes = data.times[time_slice].size
-    nfreqs = data.freqs[freq_slice].size
-
-    # Get the window function for the frequency and time slices
-    freq_window = dspec.get_window(
-        window_function,
-        data.freqs[freq_slice].size,
-    )
-    time_window = dspec.get_window(
-        window_function,
-        data.times[time_slice].size,
-    )
-    window = jnp.outer(time_window, freq_window)
-
-    # Estimate the noise variance for the coupling deconvolution
-    noise_variance = estimate_windowed_noise_variance(
-        data=data,
-        nsamples=nsamples,
-        time_slice=time_slice,
-        freq_slice=freq_slice,
-        window_function=window_function,
-    )
-
-    # Extract the relevant data from the coupling grid
-    coupling_values, index = coupling_grid.select_coupling(
-        shape=(ntimes, nfreqs),
-        **kwargs  # Placeholder for actual selection parameters
-    )
-
-    # Get data for the specified time and frequency slices
-    grid_data = coupling_grid.build_data_grid(
-        data=data,
-        noise=noise_variance,
-        time_slice=time_slice,
-        freq_slice=freq_slice,
-    )
-
-    # Fit the coupling parameters using the deconvolution method
-    # This function will use the FFT of the gridded data and the 
-    # coupling parameters to optimize the coupling parameters.
-    fit_parameters = fit_coupling_redundantly_averaged(
-        coupling_values,
-        grid_data=grid_data,
-        window=window,
-        idx=index,
-        noise=noise_variance,
-        maxiter=maxiter,
-        use_LBFGS=use_LBFGS,
-        history_size=history_size,
-        linesearch=linesearch,
-        tol=tol,
-        alpha=alpha,
-        lambda_reg=lambda_reg,
-        verbose=verbose,
-    )
-
-    RedUVCoupling = coupling
-
-    return fit_parameters
-    
 class RedUVCoupling:
     """
     Class for deconvolving visibilities using a coupling grid.
