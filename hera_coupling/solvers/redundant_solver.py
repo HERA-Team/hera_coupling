@@ -205,8 +205,8 @@ def build_data_and_coupling_grids(
     unflagged_baselines = []
     all_baselines = [] # TODO: Temporary change to fix ordering error
     for key in data:
-        all_baselines.append(key[:2])
         if pol in key:
+            all_baselines.append(key[:2])
             if np.all(~flags[key][time_slice][:, freq_slice]):
                 unflagged_baselines.append(key[:2])
 
