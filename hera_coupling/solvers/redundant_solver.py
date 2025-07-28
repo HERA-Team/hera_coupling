@@ -130,6 +130,10 @@ class RedundantCouplingManager:
             antpair: coord # Use the gridded coordinates as the value
             for antpair, coord in zip(antpairs, gridded_coords)
         }
+        self.bl_to_grid_coords.update({
+            (antpair[1], antpair[0]): -coord # Use the gridded coordinates as the value
+            for antpair, coord in zip(antpairs, gridded_coords)
+        })
 
         # Create a mapping from gridded coordinates to antenna pairs
         self.grid_coord_to_bl = {
