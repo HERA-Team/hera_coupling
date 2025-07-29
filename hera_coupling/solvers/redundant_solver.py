@@ -742,7 +742,7 @@ def deconv_loss_function(
     
     return total_loss
 
-@partial(jax.jit, static_argnames=['ngrid'])
+#@partial(jax.jit, static_argnames=['ngrid'])
 def deconv_loss_function_batched(
     parameters: dict,
     data: jnp.ndarray,
@@ -895,7 +895,8 @@ def fit_coupling_redundantly_averaged(
     history_size: int = 10,
     linesearch: str = "zoom",
     lambda_reg: float = 1e-3,
-    verbose: bool = False
+    verbose: bool = False,
+    **kwargs
 ) -> Tuple[dict, Union[dict, List[float]]]:
     """
     Optimize parameters using either L-BFGS or a custom optimizer.
@@ -980,6 +981,7 @@ def fit_coupling_redundantly_averaged(
             verbose=verbose,
             history_size=history_size,
             linesearch=linesearch,
+            **kwargs,
         )
 
         solved_parameters, meta = solver.run(
