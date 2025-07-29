@@ -751,6 +751,7 @@ def deconv_loss_function_batched(
     data_idx: jnp.ndarray,
     fit_idx: jnp.ndarray,
     ngrid: int,
+    filter_matrix: jnp.ndarray,
     lambda_reg: float=0.0,
 ):
     """
@@ -762,6 +763,14 @@ def deconv_loss_function_batched(
         coupling_idx, 
         fit_idx,
         ngrid
+    )
+
+    # Perform delay filtering using the filter matrix
+    # This assumes filter_matrix is of shape (nfreqs, nfreqs,)
+    data_deconv = jnp.einsum(
+        'af,tfb->atb',
+        filter_matrix,
+        data_deconv,
     )
 
     # Extract coupling parameters
@@ -888,6 +897,7 @@ def fit_coupling_redundantly_averaged(
     fit_idx: jnp.ndarray = None,
     ngrid: int = None,
     compressed: bool = False,
+    filter_matrix: jnp.ndarray = None,
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
@@ -969,6 +979,7 @@ def fit_coupling_redundantly_averaged(
             ngrid=int(ngrid),
             fit_idx=fit_idx,
             lambda_reg=lambda_reg,
+            filter_matrix=filter_matrix,
         )
     
     # Check if the user wants to use L-BFGS or a custom optimizer
