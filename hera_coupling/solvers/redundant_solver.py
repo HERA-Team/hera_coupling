@@ -742,7 +742,7 @@ def deconv_loss_function(
     
     return total_loss
 
-#@partial(jax.jit, static_argnames=['ngrid'])
+@partial(jax.jit, static_argnames=['ngrid'])
 def deconv_loss_function_batched(
     parameters: dict,
     data: jnp.ndarray,
