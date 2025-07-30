@@ -517,7 +517,8 @@ def grid_coupling_array(data, indices, ngrid):
     j_coords = indices[:, 1]
     
     grid = grid.at[..., i_coords, j_coords].set(data)
-    grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
+    # grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
+    grid = grid.at[..., -i_coords, -j_coords].set(data)
     grid = grid.at[..., 0, 0].set(1.0)
     return grid
 
