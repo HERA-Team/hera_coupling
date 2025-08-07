@@ -518,7 +518,6 @@ def grid_coupling_array(data, indices, ngrid):
     
     grid = grid.at[..., i_coords, j_coords].set(data)
     grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
-    # grid = grid.at[..., -i_coords, -j_coords].set(data)
     grid = grid.at[..., 0, 0].set(1.0)
     return grid
 
@@ -774,7 +773,7 @@ def deconv_loss_function_batched(
         axis=1, 
         norm="ortho"
     )
-    data_fft_avg = jnp.array(data_deconv_fft[::2] * data_deconv_fft[1::2].conj())
+    # data_fft_avg = jnp.array(data_deconv_fft[::2] * data_deconv_fft[1::2].conj())
     
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
@@ -802,6 +801,7 @@ def estimate_windowed_noise_variance(
     time_slice: slice, 
     freq_slice: slice, 
     window_function: str = "tukey", 
+    axes: tuple = (0, 1),
 ) -> Dict[Tuple[int, int, str], jnp.ndarray]:
     """
     Estimate the windowed noise variance for the coupling deconvolution. Used to set the
@@ -826,15 +826,23 @@ def estimate_windowed_noise_variance(
         noise_scale : jnp.ndarray
             The estimated noise scale for the coupling deconvolution.
     """
+    if 0 in axes:
+        time_window = dspec.gen_window(
+            window_function,
+            data.times[time_slice].size,
+        )
+    else:
+        time_window = np.ones(data.times[time_slice].size)
+
     # Get the window function for the frequency and time slices
-    freq_window = dspec.gen_window(
-        window_function,
-        data.freqs[freq_slice].size,
-    )
-    time_window = dspec.gen_window(
-        window_function,
-        data.times[time_slice].size,
-    )
+    if 1 in axes:
+        freq_window = dspec.gen_window(
+            window_function,
+            data.freqs[freq_slice].size,
+        )
+    else:
+        freq_window = np.ones(data.freqs[freq_slice].size)
+
     window = np.outer(time_window, freq_window)
     
     # Calculate the equivalent noise bandwidth for the window function
@@ -873,7 +881,7 @@ def estimate_windowed_noise_variance(
         variance = np.where(valid, variance, np.nan)
 
         # Calculate the noise scale for the autocorrelations
-        noise_var[key] = np.nanmean(variance, axis=(0, 1), keepdims=True)  # Average over time and frequency
+        noise_var[key] = np.nanmean(variance, axis=axes, keepdims=True)  # Average over time and frequency
 
     # Convert the noise variance to a DataContainer
     noise_var = DataContainer(noise_var)
