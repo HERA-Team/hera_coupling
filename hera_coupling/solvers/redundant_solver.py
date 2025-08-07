@@ -517,8 +517,8 @@ def grid_coupling_array(data, indices, ngrid):
     j_coords = indices[:, 1]
     
     grid = grid.at[..., i_coords, j_coords].set(data)
-    # grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
-    grid = grid.at[..., -i_coords, -j_coords].set(data)
+    grid = grid.at[..., -i_coords, -j_coords].set(data.conj())
+    # grid = grid.at[..., -i_coords, -j_coords].set(data)
     grid = grid.at[..., 0, 0].set(1.0)
     return grid
 
@@ -752,7 +752,6 @@ def deconv_loss_function_batched(
     data_idx: jnp.ndarray,
     fit_idx: jnp.ndarray,
     ngrid: int,
-    filter_matrix: jnp.ndarray,
     lambda_reg: float=0.0,
 ):
     """
@@ -766,23 +765,16 @@ def deconv_loss_function_batched(
         ngrid
     )
 
-    # Perform delay filtering using the filter matrix
-    # This assumes filter_matrix is of shape (nfreqs, nfreqs,)
-    data_deconv = jnp.einsum(
-        'af,tfb->atb',
-        filter_matrix,
-        data_deconv,
-    )
-
     # Extract coupling parameters
     coupling_params = parameters['coupling']
     
     # Extract deconvolved data for the specified indices, applying the window function, and compute the FFT
-    data_deconv_fft = jnp.fft.fft2(
+    data_deconv_fft = jnp.fft.fft(
         data_deconv,
-        axes=(0, 1), 
+        axis=1, 
         norm="ortho"
     )
+    data_fft_avg = jnp.array(data_deconv_fft[::2] * data_deconv_fft[1::2].conj())
     
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
@@ -791,8 +783,8 @@ def deconv_loss_function_batched(
     
     delay_fringe_sparsity = jnp.mean(
         _scaled_log_1p_normalized(
-            jnp.abs(data_deconv_fft) ** 2 / noise
-        )
+            jnp.abs(data_deconv_fft) / noise
+        ) / noise
     )
     
     # Combine the loss components
@@ -898,7 +890,6 @@ def fit_coupling_redundantly_averaged(
     fit_idx: jnp.ndarray = None,
     ngrid: int = None,
     compressed: bool = False,
-    filter_matrix: jnp.ndarray = None,
     maxiter: int = 100, 
     use_LBFGS: bool = True, 
     optimizer: optax.GradientTransformation = None,
@@ -980,7 +971,6 @@ def fit_coupling_redundantly_averaged(
             ngrid=int(ngrid),
             fit_idx=fit_idx,
             lambda_reg=lambda_reg,
-            filter_matrix=filter_matrix,
         )
     
     # Check if the user wants to use L-BFGS or a custom optimizer
