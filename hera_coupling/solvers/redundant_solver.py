@@ -779,7 +779,7 @@ def deconv_loss_function_batched(
     data_fft_avg = jnp.mean(
         (data_deconv_fft[::2] * data_deconv_fft[1::2].conj()) * effective_var ** -1, axis=0
     ) / jnp.mean(effective_var ** -1, axis=0)
-    avg_var = jnp.sum((effective_var ** 2) ** -1, axis=0) ** -0.5 * jnp.sqrt(effective_var.shape[0])
+    avg_var = jnp.sum((effective_var ** 2) ** -1, axis=0) ** -0.5 / jnp.sqrt(effective_var.shape[0])
 
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
