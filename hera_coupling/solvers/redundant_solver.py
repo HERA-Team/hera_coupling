@@ -152,6 +152,7 @@ def build_data_and_coupling_grids(
     window_function: str='hann',
     skip_autos: bool=False,
     compressed=False,
+    axes=(0, 1),
     **kwargs,
 ):
     """
@@ -198,7 +199,8 @@ def build_data_and_coupling_grids(
         nsamples=nsamples,
         time_slice=time_slice,
         freq_slice=freq_slice,
-        window_function=window_function
+        window_function=window_function,
+        axes=axes,
     )
 
     # Get all of the data which are unflagged over all times and frequencies
@@ -773,8 +775,12 @@ def deconv_loss_function_batched(
         axis=1, 
         norm="ortho"
     )
-    # data_fft_avg = jnp.array(data_deconv_fft[::2] * data_deconv_fft[1::2].conj())
-    
+    effective_var = jnp.sqrt(noise[::2] * noise[1::2])
+    data_fft_avg = jnp.mean(
+        (data_deconv_fft[::2] * data_deconv_fft[1::2].conj()) * effective_var ** -1, axis=0
+    ) / jnp.mean(effective_var ** -1, axis=0)
+    avg_var = jnp.sum((effective_var ** 2) ** -1, axis=0) ** -0.5 * jnp.sqrt(effective_var.shape[0])
+
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
         jnp.abs(coupling_params) ** 2
@@ -782,8 +788,8 @@ def deconv_loss_function_batched(
     
     delay_fringe_sparsity = jnp.mean(
         _scaled_log_1p_normalized(
-            jnp.abs(data_deconv_fft) / noise
-        ) / noise
+            jnp.abs(data_fft_avg) / avg_var
+        ) / avg_var
     )
     
     # Combine the loss components
@@ -802,6 +808,8 @@ def estimate_windowed_noise_variance(
     freq_slice: slice, 
     window_function: str = "tukey", 
     axes: tuple = (0, 1),
+    dt=10.,
+    df=122e3,
 ) -> Dict[Tuple[int, int, str], jnp.ndarray]:
     """
     Estimate the windowed noise variance for the coupling deconvolution. Used to set the
@@ -865,8 +873,8 @@ def estimate_windowed_noise_variance(
         )
 
         # Calculate the time and frequency intervals
-        dt = np.diff(data.times)[0] * 3600 * 24  # Convert to seconds
-        df = np.diff(data.freqs)[0]
+        # dt = np.diff(data.times)[0] * 3600 * 24  # Convert to seconds
+        # df = np.diff(data.freqs)[0]
 
         # nsamples & flags for this baseline
         ns = nsamples[key][time_slice][:, freq_slice]
@@ -877,11 +885,15 @@ def estimate_windowed_noise_variance(
 
         variance = (
             np.abs(auto1) * np.abs(auto2) / (ns * dt * df)
-        ) * enbw
+        )
         variance = np.where(valid, variance, np.nan)
 
         # Calculate the noise scale for the autocorrelations
-        noise_var[key] = np.nanmean(variance, axis=axes, keepdims=True)  # Average over time and frequency
+        noise_var[key] = np.nanmean(
+                window ** 2 * variance, 
+                axis=axes, 
+                keepdims=True
+        ) / np.nanmean(window, axis=axes, keepdims=True) ** 2  # Average over time and frequency
 
     # Convert the noise variance to a DataContainer
     noise_var = DataContainer(noise_var)
