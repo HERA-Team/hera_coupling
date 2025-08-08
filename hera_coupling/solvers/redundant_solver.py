@@ -776,10 +776,10 @@ def deconv_loss_function_batched(
         norm="ortho"
     )
     effective_var = jnp.sqrt(noise[::2] * noise[1::2])
-    data_fft_avg = jnp.mean(
-        (data_deconv_fft[::2] * data_deconv_fft[1::2].conj()) * effective_var ** -1, axis=0
-    ) / jnp.mean(effective_var ** -1, axis=0)
-    avg_var = jnp.sum((effective_var ** 2) ** -1, axis=0) ** -0.5 / jnp.sqrt(effective_var.shape[0])
+    #data_fft_avg = jnp.mean(
+    #    (data_deconv_fft[::2] * data_deconv_fft[1::2].conj()) * effective_var ** -1, axis=0
+    #) / jnp.mean(effective_var ** -1, axis=0)
+    #avg_var = jnp.sum((effective_var ** 2) ** -1, axis=0) ** -0.5 / jnp.sqrt(effective_var.shape[0])
 
     # Minimize the size of the coupling parameters
     param_sparsity_term = jnp.sum(
@@ -788,8 +788,8 @@ def deconv_loss_function_batched(
     
     delay_fringe_sparsity = jnp.mean(
         _scaled_log_1p_normalized(
-            jnp.abs(data_fft_avg) / avg_var
-        ) / avg_var
+            jnp.abs(data_deconv_fft[::2] * data_deconv_fft[1::2].conj()) / effective_var
+        ) / effective_var
     )
     
     # Combine the loss components
