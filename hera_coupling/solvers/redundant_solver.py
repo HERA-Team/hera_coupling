@@ -11,7 +11,7 @@ import tqdm
 import jaxopt
 import optax
 from jax import numpy as jnp
-jax.config.update("jax_enable_x64", True)
+# jax.config.update("jax_enable_x64", True)
 
 from hera_filters import dspec
 from hera_cal import utils
